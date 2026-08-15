@@ -1,0 +1,6 @@
+global
+country DE: DFS-ETSI
+	(2400 - 2483.5 @ 40), (N/A, 20), (N/A)
+	(5150 - 5250 @ 80), (N/A, 23), (N/A, N/A), AUTO-BW
+	(5250 - 5350 @ 80), (N/A, 20), (0 ms), DFS, AUTO-BW
+	(5470 - 5725 @ 160), (N/A, 26), (0 ms), DFS

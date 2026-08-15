@@ -1,0 +1,39 @@
+BSS 00:11:22:33:44:55(on wlan0) -- associated
+	last seen: 812 ms ago
+	TSF: 1109382144 usec (0d, 00:18:29)
+	freq: 2437
+	beacon interval: 100 TUs
+	capability: ESS Privacy ShortSlotTime (0x0431)
+	signal: -42.00 dBm
+	SSID: HomeNet
+	Supported rates: 1.0* 2.0* 5.5* 11.0* 18.0 24.0 36.0 54.0
+	DS Parameter set: channel 6
+	ERP: <no flags>
+	RSN:	 * Version: 1
+		 * Group cipher: CCMP
+		 * Pairwise ciphers: CCMP
+	HT capabilities:
+		Capabilities: 0x19ad
+	HT operation:
+		 * primary channel: 6
+		 * secondary channel offset: no secondary
+		 * STA channel width: 20 MHz
+BSS 00:11:22:33:44:66(on wlan0)
+	last seen: 2104 ms ago
+	freq: 2412
+	beacon interval: 100 TUs
+	capability: ESS Privacy ShortSlotTime (0x0431)
+	signal: -71.00 dBm
+	SSID: Neighbour-2G
+	DS Parameter set: channel 1
+	HT operation:
+		 * primary channel: 1
+		 * secondary channel offset: no secondary
+BSS 00:11:22:33:44:77(on wlan0)
+	last seen: 5570 ms ago
+	freq: 2462
+	beacon interval: 100 TUs
+	capability: ESS ShortSlotTime (0x0421)
+	signal: -83.00 dBm
+	SSID: FarAway
+	DS Parameter set: channel 11

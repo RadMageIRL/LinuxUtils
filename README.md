@@ -18,6 +18,7 @@ what ships with the distro.
 | Tool | Description |
 |------|-------------|
 | [`logi-rx`](logi-rx/) | Audit and tune a Logitech wireless receiver: USB autosuspend, remote wakeup, ACPI gating, battery, and an empirical link-quality test for diagnosing range problems. |
+| [`rfscan`](rfscan/) | Map 2.4 GHz channel occupancy weighted by signal strength and recommend a quieter channel for your access point. Read-only, unprivileged, regulatory-domain aware. |
 
 ## Install
 

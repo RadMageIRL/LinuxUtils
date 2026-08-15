@@ -1,0 +1,86 @@
+BSS 00:11:22:33:44:01(on wlan0) -- associated
+	last seen: 340 ms ago
+	TSF: 88123456 usec (0d, 00:01:28)
+	freq: 2437
+	beacon interval: 100 TUs
+	capability: ESS Privacy ShortSlotTime (0x0431)
+	signal: -42.00 dBm
+	SSID: HomeNet
+	Supported rates: 1.0* 2.0* 5.5* 11.0* 18.0 24.0 36.0 54.0
+	DS Parameter set: channel 6
+	HT capabilities:
+		Capabilities: 0x19ef
+		HT20/HT40
+	HT operation:
+		 * primary channel: 6
+		 * secondary channel offset: above
+		 * STA channel width: any
+	Extended capabilities: HT Information Exchange Supported
+BSS 00:11:22:33:44:02(on wlan0)
+	last seen: 1200 ms ago
+	freq: 2412
+	beacon interval: 100 TUs
+	capability: ESS Privacy (0x0411)
+	signal: -78.00 dBm
+	SSID:
+	DS Parameter set: channel 1
+BSS 00:11:22:33:44:03(on wlan0)
+	last seen: 990 ms ago
+	freq: 2462
+	signal: -55.00 dBm
+	SSID: Café_Wireless
+	DS Parameter set: channel 11
+BSS 00:11:22:33:44:04(on wlan0)
+	last seen: 15000 ms ago
+	freq: 2412
+	beacon interval: 100 TUs
+	SSID: NoSignalNet
+	DS Parameter set: channel 1
+BSS 00:11:22:33:44:05(on wlan0)
+	last seen: 4300 ms ago
+	freq: 2437
+	signal: -60.00 dBm
+	SSID: \x00\x00\x00\x00\x00
+	DS Parameter set: channel 6
+BSS 00:11:22:33:44:06(on wlan0)
+	last seen: 700 ms ago
+	beacon interval: 100 TUs
+	capability: ESS (0x0401)
+	signal: -66.00 dBm
+	SSID: NoFreqAtAll
+BSS 00:11:22:33:44:07(on wlan0)
+	last seen: 150 ms ago
+	freq: 5180
+	beacon interval: 100 TUs
+	capability: ESS Privacy (0x0411)
+	signal: -50.00 dBm
+	SSID: HomeNet-5G
+	VHT capabilities:
+		VHT Capabilities (0x338001b2):
+	VHT operation:
+		 * channel width: 1 (80 MHz)
+		 * center freq segment 1: 42
+	HT operation:
+		 * primary channel: 36
+		 * secondary channel offset: above
+BSS 00:11:22:33:44:08(on wlan0)
+	last seen: 8800 ms ago
+	freq: 2472
+	signal: -80.00 dBm
+	SSID: 日本語ネット
+	DS Parameter set: channel 13
+	HT operation:
+		 * primary channel: 13
+		 * secondary channel offset: below
+		 * STA channel width: any
+BSS 00:11:22:33:44:09(on wlan0)
+	last seen: 3300 ms ago
+	freq: 2417
+	signal: -70.00 dBm
+	SSID: OffGrid
+	DS Parameter set: channel 2
+	Some unrecognised element the parser has never heard of: 0xdeadbeef
+	Country: GB	Environment: Indoor/Outdoor
+		Channels [1 - 13] @ 20 dBm
+BSS 00:11:22:33:44:0a(on wlan0)
+	last seen: 100 ms ago
