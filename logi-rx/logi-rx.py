@@ -5,26 +5,31 @@ logi-rx.py - Logitech wireless receiver checker/tuner for Linux.
 Covers the things that actually matter for a couch-distance HTPC receiver:
 
   * locates the receiver in sysfs and reports its USB topology
+  * lists other devices on the same host controller, because a SuperSpeed
+    neighbour is a real and actionable 2.4 GHz noise source
   * checks hid_logitech_dj is loaded (needed for Unifying device passthrough)
   * disables USB autosuspend on the receiver (a real cause of "wakes up slow")
   * enables USB remote wakeup so the keyboard can resume the machine
   * reports the parent xHCI controller's ACPI wakeup state, which gates the above
   * installs a persistent udev rule so both survive reboot and re-plug
-  * reads battery level straight from the hidpp power_supply class (no solaar needed)
-  * --watch mode: measures input-event gaps so you can A/B test port placement
-    and prove whether a given USB port is costing you range
+  * reads battery level straight from the hidpp power_supply class (no solaar)
+  * --watch mode: measures input-event gaps, calibrates the dropout threshold
+    to the device's own report rate, and uses the motion velocity either side
+    of each gap to tell a real dropout from you letting go of the mouse
 
 Read-only by default. Nothing is changed unless you pass --apply.
 
     ./logi-rx.py                 # check everything, change nothing
+    ./logi-rx.py --json          # same data, machine-readable
     sudo ./logi-rx.py --apply    # apply the fixes + install udev rule
-    ./logi-rx.py --watch         # empirical dropout test (move the pointer)
+    ./logi-rx.py --watch         # empirical dropout test
     sudo ./logi-rx.py --revert   # remove the udev rule
 
 Tested against sysfs layout on kernel 5.x/6.x. No third-party dependencies.
 """
 
 import argparse
+import json
 import os
 import re
 import struct
@@ -33,11 +38,67 @@ import sys
 import time
 from pathlib import Path
 
-USB_DEVICES = Path("/sys/bus/usb/devices")
-POWER_SUPPLY = Path("/sys/class/power_supply")
-PROC_INPUT = Path("/proc/bus/input/devices")
-PROC_ACPI_WAKEUP = Path("/proc/acpi/wakeup")
-UDEV_RULE = Path("/etc/udev/rules.d/90-logitech-receiver.rules")
+# ---------------------------------------------------------------- test seams
+#
+# Every system read resolves through sysp() and every external command through
+# run(), so the tests point SYSROOT at a synthetic sysfs tree and stub run().
+# Same arrangement freshcheck uses, and for the same reason: this tool is the
+# only one in the repo that writes to the system, so every branch has to be
+# reachable without root and without a real receiver plugged in.
+
+SYSROOT = Path("/")
+PLATFORM = None  # tests set "linux"
+IS_ROOT = None  # tests set a bool
+
+
+def sysp(path):
+    """Resolve an absolute system path underneath SYSROOT."""
+    return SYSROOT / str(path).lstrip("/")
+
+
+def is_linux():
+    return (PLATFORM or sys.platform) == "linux"
+
+
+def is_root():
+    if IS_ROOT is not None:
+        return IS_ROOT
+    try:
+        return os.geteuid() == 0
+    except AttributeError:
+        return False
+
+
+def run(cmd, timeout=30):
+    """Run a command. Returns (rc, stdout, reason); rc is None if it could not
+    be run at all."""
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, timeout=timeout, text=True, errors="replace"
+        )
+    except FileNotFoundError:
+        return None, "", f"{cmd[0]} not found"
+    except subprocess.TimeoutExpired:
+        return None, "", f"{' '.join(cmd)} timed out"
+    except OSError as exc:
+        return None, "", str(exc)
+    return proc.returncode, proc.stdout, (proc.stderr or "").strip() or None
+
+
+# ----------------------------------------------------------------- constants
+
+USB_DEVICES = "/sys/bus/usb/devices"
+POWER_SUPPLY = "/sys/class/power_supply"
+PROC_INPUT = "/proc/bus/input/devices"
+PROC_ACPI_WAKEUP = "/proc/acpi/wakeup"
+PROC_MODULES = "/proc/modules"
+SYS_MODULE_DJ = "/sys/module/hid_logitech_dj"
+UDEV_RULE = "/etc/udev/rules.d/90-logitech-receiver.rules"
+
+# Written into every generated rule and required before --revert will delete
+# anything. A file at that path this tool did not write is not this tool's to
+# remove.
+MANAGED_MARKER = "# Managed by logi-rx.py"
 
 LOGITECH_VID = "046d"
 
@@ -59,46 +120,73 @@ KNOWN_RECEIVER_PIDS = {
     "c51b": "Nano Receiver (legacy)",
 }
 
-# ---------------------------------------------------------------- formatting
+# A device is SuperSpeed at 5 Gbps or above. Those emit broadband noise across
+# 2.4 GHz, which is why a neighbour on the same controller is worth reporting.
+SUPERSPEED_MBPS = 5000
+
+# --- watch-mode tuning. All of these are pinned by mutation tests.
+
+# A gap counts as a candidate dropout at this multiple of the device's own
+# median inter-event interval. Calibrating rather than fixing the threshold is
+# the point: a Unifying receiver reports at 125 Hz (8 ms) and a Lightspeed
+# mouse at 1000 Hz (1 ms), so one fixed millisecond figure means twelve missed
+# reports on one device and a hundred on the other.
+GAP_MULTIPLIER = 10.0
+
+# Below this many motion samples the median is not stable enough to calibrate
+# against, and a fabricated threshold is worse than admitting the run was too
+# short.
+MIN_CALIBRATION_EVENTS = 50
+
+# How many samples either side of a gap to average when classifying it. Only
+# the samples immediately adjacent matter: a user pause tapers, and a mean over
+# a whole window is dominated by the fast samples at the start of the taper,
+# which reads a real pause as a dropout.
+VELOCITY_EDGE_SAMPLES = 3
+
+# The "was the pointer actually moving" floor, as a fraction of the session's
+# own median delta. Relative rather than absolute so the classifier is not
+# calibrated to one DPI setting and one user's hand speed.
+VELOCITY_FLOOR_FRAC = 0.35
+
+DEFAULT_DURATION = 30
+
+# ------------------------------------------------------------- status model
+#
+# Same six statuses freshcheck uses, and the same rule: unknown, skipped and
+# info never affect the exit code. A check that could not read something for
+# want of root is not a finding about the machine.
+
+STATUS_ORDER = ["fail", "warn", "unknown", "info", "skipped", "ok"]
+EXIT_STATUSES = {"fail", "warn"}
+
+# Exit codes, matching rfscan and freshcheck. 1 means, and only means, that
+# there is a finding to act on. Anything that reached no verdict is 2.
+NO_FINDINGS = 0
+FINDINGS = 1
+COULD_NOT_DETERMINE = 2
 
 
-class Out:
-    """Tiny console formatter. Colour only when stdout is a terminal."""
+def make(check_id, status, summary, detail=None, fix=None, result_id=None):
+    return {
+        "id": result_id or check_id,
+        "check": check_id,
+        "status": status,
+        "summary": summary,
+        "detail": list(detail or []),
+        "fix": fix,
+    }
 
-    def __init__(self, color=True):
-        self.color = color and sys.stdout.isatty()
-        self.problems = []
-        self.fixes = []
 
-    def _c(self, code, text):
-        return f"\033[{code}m{text}\033[0m" if self.color else text
+CHECKS = []
 
-    def header(self, text):
-        print()
-        print(self._c("1;36", text))
-        print(self._c("36", "─" * len(text)))
 
-    def ok(self, text):
-        print(f"  {self._c('32', '[ ok ]')} {text}")
+def register(check_id, title):
+    def decorator(fn):
+        CHECKS.append({"id": check_id, "title": title, "fn": fn})
+        return fn
 
-    def warn(self, text, remedy=None):
-        print(f"  {self._c('33', '[warn]')} {text}")
-        self.problems.append(text)
-        if remedy:
-            print(f"         {self._c('90', remedy)}")
-
-    def fail(self, text, remedy=None):
-        print(f"  {self._c('31', '[fail]')} {text}")
-        self.problems.append(text)
-        if remedy:
-            print(f"         {self._c('90', remedy)}")
-
-    def info(self, text):
-        print(f"  {self._c('90', '[info]')} {text}")
-
-    def changed(self, text):
-        print(f"  {self._c('35', '[ >> ]')} {text}")
-        self.fixes.append(text)
+    return decorator
 
 
 # ------------------------------------------------------------ sysfs helpers
@@ -124,10 +212,11 @@ def write_attr(base, name, value):
 
 def usb_device_dirs():
     """All real USB device nodes (skips interfaces like '1-3:1.0')."""
-    if not USB_DEVICES.is_dir():
+    root = sysp(USB_DEVICES)
+    if not root.is_dir():
         return []
     out = []
-    for entry in sorted(USB_DEVICES.iterdir()):
+    for entry in sorted(root.iterdir()):
         if ":" in entry.name:  # interface, not a device
             continue
         if read_attr(entry, "idVendor") is None:
@@ -146,7 +235,7 @@ def find_receivers():
         product = read_attr(dev, "product") or "(no product string)"
         found.append(
             {
-                "path": dev,
+                "path": str(dev),
                 "name": dev.name,
                 "pid": pid,
                 "product": product,
@@ -165,13 +254,16 @@ def find_receivers():
             return 1
         return 2
 
-    found.sort(key=rank)
+    found.sort(key=lambda d: (rank(d), d["name"]))
     return found
 
 
 def root_hub_for(dev_path):
     """Walk up the sysfs tree to the root hub (usbN) owning this device."""
-    node = Path(dev_path).resolve()
+    try:
+        node = Path(dev_path).resolve()
+    except OSError:
+        return None
     for _ in range(12):  # depth guard
         if re.fullmatch(r"usb\d+", node.name):
             return node
@@ -184,152 +276,301 @@ def root_hub_for(dev_path):
 
 def pci_controller_for(dev_path):
     """Resolve the PCI address of the host controller behind this device."""
-    resolved = str(Path(dev_path).resolve())
+    try:
+        resolved = str(Path(dev_path).resolve())
+    except OSError:
+        return None
+    # Normalise separators: on a Windows test host resolve() yields backslashes
+    # and the address would never match.
+    resolved = resolved.replace("\\", "/")
     matches = re.findall(r"/(0000:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f])", resolved)
     return matches[-1] if matches else None
+
+
+def speed_label(speed):
+    if not speed or not speed.replace(".", "").isdigit():
+        return ""
+    value = float(speed)
+    if value >= SUPERSPEED_MBPS:
+        return "SuperSpeed"
+    if value >= 480:
+        return "USB 2.0"
+    return "low/full speed"
 
 
 # ------------------------------------------------------------------- checks
 
 
-def check_topology(out, rx):
-    """Report bus placement. Be honest about what sysfs can and cannot tell us."""
-    out.header("USB topology")
-
-    out.info(f"Receiver: {rx['product']} [{LOGITECH_VID}:{rx['pid']}]")
+@register("topology", "USB topology")
+def check_topology(ctx):
+    rx = ctx["receiver"]
+    detail = [
+        f"Receiver:  {rx['product']} [{LOGITECH_VID}:{rx['pid']}]",
+    ]
     if rx["label"]:
-        out.info(f"Type:     {rx['label']}")
-    out.info(f"Sysfs:    {rx['path']}")
-    out.info(f"Address:  bus {rx['busnum']} device {rx['devnum']}")
+        detail.append(f"Type:      {rx['label']}")
+    detail.append(f"Sysfs:     {rx['path']}")
+    detail.append(f"Address:   bus {rx['busnum']} device {rx['devnum']}")
 
     hub = root_hub_for(rx["path"])
-    hub_speed = read_attr(hub, "speed") if hub else None
-    if hub_speed:
-        out.info(f"Root hub: {hub.name} @ {hub_speed} Mbps")
-
+    if hub is not None:
+        hub_speed = read_attr(hub, "speed")
+        if hub_speed:
+            detail.append(f"Root hub:  {hub.name} @ {hub_speed} Mbps")
     pci = pci_controller_for(rx["path"])
     if pci:
-        out.info(f"Host ctlr: {pci}")
+        detail.append(f"Host ctlr: {pci}")
 
-    print()
-    print("  All USB root hubs on this machine:")
+    detail.append("")
+    detail.append("USB root hubs on this machine:")
     for dev in usb_device_dirs():
         if not re.fullmatch(r"usb\d+", dev.name):
             continue
         speed = read_attr(dev, "speed") or "?"
         ports = read_attr(dev, "maxchild") or "?"
-        marker = "  <-- receiver is here" if hub and dev.name == hub.name else ""
-        tag = "USB 2.0" if speed == "480" else "SuperSpeed" if speed and speed.isdigit() and int(speed) >= 5000 else ""
-        print(f"    {dev.name:<8} {speed:>6} Mbps  {ports:>2} ports  {tag}{marker}")
+        marker = "  <-- receiver is here" if hub is not None and dev.name == hub.name else ""
+        detail.append(f"    {dev.name:<8} {speed:>6} Mbps  {ports:>2} ports  {speed_label(speed)}{marker}")
 
-    print()
-    out.warn(
-        "sysfs cannot tell you whether the PHYSICAL port is USB 2 or USB 3.",
-        "A full-speed HID device always enumerates on the USB2 companion bus even\n"
-        "         when plugged into a blue USB3 port, so both look identical here. Use\n"
-        "         --watch to A/B test ports empirically instead of guessing.",
+    detail.append("")
+    detail.append(
+        "This does NOT tell you whether the physical port is USB 2 or USB 3. A "
+        "full-speed HID device always enumerates on the USB 2 companion bus, "
+        "whether you plugged it into a black port or a blue one, so the two are "
+        "indistinguishable from software. Use --watch to A/B test ports instead "
+        "of guessing."
+    )
+    return make("topology", "info", f"Receiver at {rx['name']} ({rx['product']})", detail=detail)
+
+
+@register("siblings", "Devices sharing the host controller")
+def check_siblings(ctx):
+    """Correlation, not diagnosis.
+
+    The tool cannot tell a USB 2 port from a USB 3 one, and does not claim to.
+    It can say that a SuperSpeed device is enumerated on the same controller,
+    which is real evidence the user can act on by moving one of them."""
+    rx = ctx["receiver"]
+    pci = pci_controller_for(rx["path"])
+    if not pci:
+        return make(
+            "siblings",
+            "skipped",
+            "Could not resolve the receiver's host controller",
+            detail=["Without a PCI address there is nothing to compare against."],
+        )
+
+    siblings = []
+    for dev in usb_device_dirs():
+        if dev.name == rx["name"]:
+            continue
+        # Root hubs are not neighbours. Every modern xHCI controller exposes a
+        # SuperSpeed root hub, so counting them would make this fire on
+        # essentially every machine and say nothing about whether an actual
+        # noisy device is nearby.
+        if re.fullmatch(r"usb\d+", dev.name):
+            continue
+        if pci_controller_for(dev) != pci:
+            continue
+        speed = read_attr(dev, "speed") or "?"
+        siblings.append(
+            {
+                "name": dev.name,
+                "product": read_attr(dev, "product") or "(no product string)",
+                "speed": speed,
+                "superspeed": speed.replace(".", "").isdigit()
+                and float(speed) >= SUPERSPEED_MBPS,
+            }
+        )
+
+    if not siblings:
+        return make(
+            "siblings",
+            "info",
+            f"Nothing else is enumerated on {pci}",
+            detail=["The receiver has the host controller to itself."],
+        )
+
+    detail = [f"Host controller {pci} also carries:"]
+    for sib in siblings:
+        flag = "  <-- SuperSpeed" if sib["superspeed"] else ""
+        detail.append(f"    {sib['name']:<10} {sib['speed']:>6} Mbps  {sib['product']}{flag}")
+
+    loud = [s for s in siblings if s["superspeed"]]
+    if loud:
+        detail.append("")
+        detail.append(
+            "SuperSpeed signalling emits broadband noise across 2.4 GHz. A device "
+            "like that on the same controller, or a cable running alongside the "
+            "receiver, raises the noise floor and costs range."
+        )
+        detail.append(
+            "This is a correlation and not a diagnosis. It says a plausible noise "
+            "source is nearby, not that it is causing your problem. --watch with "
+            "the neighbour unplugged is what would settle it."
+        )
+        summary = f"{len(loud)} SuperSpeed device(s) share the receiver's controller"
+    else:
+        summary = f"{len(siblings)} other device(s) share the receiver's controller"
+
+    return make("siblings", "info", summary, detail=detail)
+
+
+@register("module", "Kernel module")
+def check_module(ctx):
+    text = None
+    try:
+        text = sysp(PROC_MODULES).read_text()
+    except OSError:
+        text = None
+
+    if text is None:
+        if sysp(SYS_MODULE_DJ).exists():
+            return make("module", "ok", "hid_logitech_dj is built in")
+        return make(
+            "module",
+            "unknown",
+            "Could not read /proc/modules",
+            detail=["Cannot tell whether hid_logitech_dj is loaded."],
+        )
+
+    if re.search(r"^hid_logitech_dj\b", text, re.M):
+        return make("module", "ok", "hid_logitech_dj is loaded")
+    if sysp(SYS_MODULE_DJ).exists():
+        return make("module", "ok", "hid_logitech_dj is built in")
+    return make(
+        "module",
+        "fail",
+        "hid_logitech_dj is not loaded",
+        detail=[
+            "Without it the receiver appears as one generic HID device, and",
+            "per-device battery reporting and pairing will not work.",
+        ],
+        fix="sudo modprobe hid-logitech-dj",
     )
 
 
-def check_dj_module(out):
-    out.header("Kernel module")
-    try:
-        mods = Path("/proc/modules").read_text()
-    except OSError:
-        out.warn("Could not read /proc/modules")
-        return
-    if re.search(r"^hid_logitech_dj\b", mods, re.M):
-        out.ok("hid_logitech_dj is loaded")
-    elif Path("/sys/module/hid_logitech_dj").exists():
-        out.ok("hid_logitech_dj is built in")
-    else:
-        out.fail(
-            "hid_logitech_dj is not loaded",
-            "Without it the receiver appears as one generic HID device and per-device\n"
-            "         battery reporting and pairing will not work. Try: modprobe hid-logitech-dj",
-        )
-
-
-def check_autosuspend(out, rx, apply_changes):
-    """USB autosuspend on an input receiver causes laggy first-input after idle."""
-    out.header("USB autosuspend")
-
+@register("autosuspend", "USB autosuspend")
+def check_autosuspend(ctx):
+    rx = ctx["receiver"]
     control = read_attr(rx["path"], "power/control")
     delay = read_attr(rx["path"], "power/autosuspend_delay_ms")
 
     if control is None:
-        out.warn("power/control not exposed; skipping")
-        return
+        # Not exposed means runtime PM does not apply to this device. That is
+        # not the same as it being misconfigured.
+        return make(
+            "autosuspend",
+            "skipped",
+            "power/control is not exposed for this device",
+            detail=["Runtime power management does not apply here."],
+        )
 
-    out.info(f"power/control = {control}" + (f"  (delay {delay} ms)" if delay else ""))
+    detail = [f"power/control = {control}" + (f"  (delay {delay} ms)" if delay else "")]
 
     if control == "on":
-        out.ok("Autosuspend already disabled for this receiver")
-        return
+        return make("autosuspend", "ok", "Autosuspend is disabled for this receiver", detail=detail)
 
-    out.warn(
+    result = make(
+        "autosuspend",
+        "warn",
         "Receiver is allowed to autosuspend",
-        "This shows up as the pointer ignoring the first flick after the box has\n"
-        "         been idle. Harmless on a desk, irritating from the couch.",
+        detail=detail
+        + [
+            "This shows up as the pointer ignoring the first flick after the box",
+            "has been idle. Harmless on a desk, irritating from the couch.",
+        ],
+        fix=f"echo on | sudo tee {rx['path']}/power/control",
     )
 
-    if apply_changes:
+    if ctx["apply"]:
         good, err = write_attr(rx["path"], "power/control", "on")
         if good:
-            out.changed("Set power/control = on (runtime)")
-        else:
-            out.fail(f"Could not write power/control: {err}")
+            ctx["applied"].append("power/control = on")
+            return make(
+                "autosuspend",
+                "ok",
+                "Autosuspend disabled (applied)",
+                detail=detail + ["Set power/control = on at runtime."],
+            )
+        return make(
+            "autosuspend", "fail", f"Could not write power/control: {err}", detail=detail
+        )
+    return result
 
 
-def check_wakeup(out, rx, apply_changes):
-    out.header("USB remote wakeup")
-
+@register("wakeup", "USB remote wakeup")
+def check_wakeup(ctx):
+    rx = ctx["receiver"]
     wakeup = read_attr(rx["path"], "power/wakeup")
+
     if wakeup is None:
-        out.warn(
-            "power/wakeup not exposed for this device",
-            "The device did not advertise remote-wakeup capability. It cannot resume\n"
-            "         the machine regardless of settings.",
+        # The device never advertised remote-wakeup capability. There is
+        # nothing to enable, so this is not applicable rather than a problem:
+        # reporting it as a warning would send the user looking for a setting
+        # that does not exist.
+        return make(
+            "wakeup",
+            "skipped",
+            "This device does not support remote wakeup",
+            detail=[
+                "power/wakeup is not exposed, so the device did not advertise the",
+                "capability. It cannot resume the machine regardless of settings.",
+            ],
         )
-        return
 
-    out.info(f"power/wakeup = {wakeup}")
-
+    detail = [f"power/wakeup = {wakeup}"]
     if wakeup == "enabled":
-        out.ok("Remote wakeup is enabled")
-    else:
-        out.warn(
-            "Remote wakeup is disabled - keyboard will not resume the machine",
-            "This is the classic K400 complaint. It is a settings problem, not a\n"
-            "         hardware limitation.",
+        return make("wakeup", "ok", "Remote wakeup is enabled", detail=detail)
+
+    if ctx["apply"]:
+        good, err = write_attr(rx["path"], "power/wakeup", "enabled")
+        if good:
+            ctx["applied"].append("power/wakeup = enabled")
+            return make(
+                "wakeup",
+                "ok",
+                "Remote wakeup enabled (applied)",
+                detail=detail + ["Set power/wakeup = enabled at runtime."],
+            )
+        return make("wakeup", "fail", f"Could not write power/wakeup: {err}", detail=detail)
+
+    return make(
+        "wakeup",
+        "warn",
+        "Remote wakeup is disabled; the keyboard will not resume the machine",
+        detail=detail
+        + ["This is the classic K400 complaint. A settings problem, not a hardware limit."],
+        fix=f"echo enabled | sudo tee {rx['path']}/power/wakeup",
+    )
+
+
+@register("acpi", "ACPI controller wakeup")
+def check_acpi(ctx):
+    """The per-port setting is useless if the parent controller is masked."""
+    rx = ctx["receiver"]
+    path = sysp(PROC_ACPI_WAKEUP)
+    if not path.exists():
+        return make(
+            "acpi",
+            "skipped",
+            "/proc/acpi/wakeup is not present",
+            detail=["Non-ACPI system, or ACPI wakeup support is disabled."],
         )
-        if apply_changes:
-            good, err = write_attr(rx["path"], "power/wakeup", "enabled")
-            if good:
-                out.changed("Set power/wakeup = enabled (runtime)")
-            else:
-                out.fail(f"Could not write power/wakeup: {err}")
 
-
-def check_acpi_wakeup(out, rx):
-    """The port setting is useless if the parent controller is masked in ACPI."""
-    out.header("ACPI controller wakeup")
-
-    if not PROC_ACPI_WAKEUP.exists():
-        out.info("/proc/acpi/wakeup not present (non-ACPI or disabled); skipping")
-        return
+    try:
+        lines = path.read_text().splitlines()
+    except OSError as exc:
+        return make("acpi", "unknown", f"Could not read /proc/acpi/wakeup: {exc}")
 
     pci = pci_controller_for(rx["path"])
     if not pci:
-        out.info("Could not resolve host controller PCI address; showing all entries")
+        return make(
+            "acpi",
+            "unknown",
+            "Could not resolve the receiver's host controller",
+            detail=["Without a PCI address the wakeup entries cannot be matched."],
+        )
 
-    try:
-        lines = PROC_ACPI_WAKEUP.read_text().splitlines()
-    except OSError as exc:
-        out.warn(f"Could not read /proc/acpi/wakeup: {exc}")
-        return
-
-    matched = False
     for line in lines:
         if not line.strip() or line.startswith("Device"):
             continue
@@ -337,40 +578,70 @@ def check_acpi_wakeup(out, rx):
         if len(parts) < 3:
             continue
         name, sstate, status = parts[0], parts[1], parts[2]
-        sysfs_node = parts[3] if len(parts) > 3 else ""
-
-        if pci and pci in sysfs_node:
-            matched = True
-            enabled = "enabled" in status
-            if enabled:
-                out.ok(f"{name} ({sysfs_node}) is wakeup-enabled, deepest state {sstate}")
-            else:
-                out.fail(
-                    f"{name} ({sysfs_node}) is wakeup-DISABLED",
-                    f"The per-port setting cannot work while the parent controller is masked.\n"
-                    f"         Enable with:  echo {name} | sudo tee /proc/acpi/wakeup\n"
-                    f"         WARNING: that write is a TOGGLE, not a set. Running it twice\n"
-                    f"         puts you back where you started. This script will not do it for\n"
-                    f"         you precisely because it is not idempotent.",
-                )
-
-    if pci and not matched:
-        out.info(f"No /proc/acpi/wakeup entry references {pci} - usually fine")
-
-
-def check_battery(out):
-    """hidpp exposes battery natively; no need for solaar just to read a percentage."""
-    out.header("Battery")
-
-    if not POWER_SUPPLY.is_dir():
-        out.info("No power_supply class; skipping")
-        return
-
-    found = False
-    for entry in sorted(POWER_SUPPLY.iterdir()):
-        if not entry.name.startswith("hidpp_battery"):
+        node = parts[3] if len(parts) > 3 else ""
+        if pci not in node:
             continue
-        found = True
+        if "enabled" in status:
+            return make(
+                "acpi",
+                "ok",
+                f"{name} ({node}) is wakeup-enabled, deepest state {sstate}",
+            )
+        return make(
+            "acpi",
+            "fail",
+            f"{name} ({node}) is wakeup-DISABLED",
+            detail=[
+                "The per-port setting cannot work while the parent controller is",
+                "masked in ACPI.",
+                "",
+                "That write is a TOGGLE, not a set. Running it twice puts you back",
+                "where you started, which is exactly why this tool will not do it",
+                "for you: there is no way to make it idempotent.",
+            ],
+            fix=f"echo {name} | sudo tee /proc/acpi/wakeup   # run EXACTLY once",
+        )
+
+    return make(
+        "acpi",
+        "info",
+        f"No /proc/acpi/wakeup entry references {pci}",
+        detail=["Usually fine. Not every controller is listed."],
+    )
+
+
+@register("battery", "Battery")
+def check_battery(ctx):
+    root = sysp(POWER_SUPPLY)
+    if not root.is_dir():
+        return make("battery", "skipped", "No power_supply class on this system")
+
+    entries = []
+    try:
+        for entry in sorted(root.iterdir()):
+            if entry.name.startswith("hidpp_battery"):
+                entries.append(entry)
+    except OSError:
+        return make("battery", "unknown", "Could not enumerate the power_supply class")
+
+    if not entries:
+        return make(
+            "battery",
+            "skipped",
+            "No hidpp_battery devices",
+            detail=[
+                "Normal for devices that do not report battery over HID++,",
+                "including some K400 revisions.",
+                "",
+                "Worth knowing regardless: falling alkaline voltage cuts transmit",
+                "power long before any indicator fires. If range degrades over",
+                "months, swap cells before debugging RF.",
+            ],
+        )
+
+    detail = []
+    worst = "ok"
+    for entry in entries:
         model = read_attr(entry, "model_name") or entry.name
         capacity = read_attr(entry, "capacity")
         level = read_attr(entry, "capacity_level")
@@ -383,41 +654,43 @@ def check_battery(out):
             bits.append(level)
         if status and status.lower() != "unknown":
             bits.append(status)
-        detail = ", ".join(bits) if bits else "no reading"
+        detail.append(f"{model}: {', '.join(bits) if bits else 'no reading'}")
 
         low = (capacity and capacity.isdigit() and int(capacity) <= 20) or (
             level and level.lower() in {"low", "critical"}
         )
-        (out.warn if low else out.ok)(f"{model}: {detail}")
+        if low:
+            worst = "warn"
 
-    if not found:
-        out.info(
-            "No hidpp_battery devices. Normal for cheaper devices that do not report "
-            "battery over HID++, including some K400 revisions."
+    if worst == "warn":
+        return make(
+            "battery",
+            "warn",
+            "A paired device is low on battery",
+            detail=detail + ["Low cells cut transmit power, which reads as range loss."],
+            fix="Replace or recharge the cells",
         )
-        out.info(
-            "Falling alkaline voltage cuts transmit power long before any indicator "
-            "fires. If range degrades over months, swap cells before debugging RF."
-        )
+    return make("battery", "ok", f"{len(entries)} battery reading(s), all healthy", detail=detail)
 
 
-def check_solaar(out):
-    out.header("solaar")
+@register("solaar", "solaar")
+def check_solaar(ctx):
     from shutil import which
 
     if which("solaar"):
-        out.ok("solaar is installed")
-    else:
-        out.info("solaar not found - optional, but handy for pairing and remapping")
-        out.info("Arch/CachyOS:  sudo pacman -S solaar")
-
-
-# --------------------------------------------------------------- udev rule
+        return make("solaar", "ok", "solaar is installed")
+    return make(
+        "solaar",
+        "info",
+        "solaar is not installed",
+        detail=["Optional, but handy for pairing and button remapping."],
+        fix="sudo pacman -S solaar   # or your distro's equivalent",
+    )
 
 
 def build_rule(rx):
     return (
-        "# Managed by logi-rx.py - Logitech receiver: keep awake, allow resume.\n"
+        f"{MANAGED_MARKER} - Logitech receiver: keep awake, allow resume.\n"
         "# Disables runtime autosuspend and enables USB remote wakeup.\n"
         'ACTION=="add", SUBSYSTEM=="usb", '
         f'ATTR{{idVendor}}=="{LOGITECH_VID}", ATTR{{idProduct}}=="{rx["pid"]}", '
@@ -425,69 +698,119 @@ def build_rule(rx):
     )
 
 
-def check_udev(out, rx, apply_changes):
-    out.header("Persistent udev rule")
-
+@register("udev", "Persistent udev rule")
+def check_udev(ctx):
+    rx = ctx["receiver"]
     desired = build_rule(rx)
+    path = sysp(UDEV_RULE)
 
-    if UDEV_RULE.exists():
-        current = UDEV_RULE.read_text()
+    if path.exists():
+        try:
+            current = path.read_text()
+        except OSError as exc:
+            return make("udev", "unknown", f"Could not read {UDEV_RULE}: {exc}")
         if current.strip() == desired.strip():
-            out.ok(f"{UDEV_RULE} is present and current")
-            return
-        out.warn(f"{UDEV_RULE} exists but does not match this receiver's PID")
+            return make(
+                "udev",
+                "ok",
+                f"{UDEV_RULE} is present and current",
+                detail=[f"Pinned to idProduct {rx['pid']}, not all of {LOGITECH_VID}."],
+            )
+        summary = f"{UDEV_RULE} exists but does not match this receiver"
     else:
-        out.warn(
-            "No persistent rule - runtime settings are lost on reboot or re-plug",
-            f"Would install: {UDEV_RULE}",
+        summary = "No persistent rule; runtime settings are lost on reboot or re-plug"
+
+    if ctx["apply"]:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(desired)
+        except OSError as exc:
+            return make("udev", "fail", f"Could not write the rule: {exc}")
+        ctx["applied"].append(f"wrote {UDEV_RULE}")
+        for cmd in (
+            ["udevadm", "control", "--reload"],
+            ["udevadm", "trigger", "--subsystem-match=usb"],
+        ):
+            rc, _, reason = run(cmd)
+            if rc is None:
+                ctx["applied"].append(f"{' '.join(cmd)}: {reason}")
+            else:
+                ctx["applied"].append(" ".join(cmd))
+        return make(
+            "udev",
+            "ok",
+            f"Wrote {UDEV_RULE} (applied)",
+            detail=[f"Pinned to idProduct {rx['pid']}, not all of {LOGITECH_VID}."],
         )
 
-    if not apply_changes:
-        print()
-        for line in desired.rstrip().splitlines():
-            print(f"    {line}")
-        return
+    return make(
+        "udev",
+        "warn",
+        summary,
+        detail=["Would install:"] + [f"    {line}" for line in desired.rstrip().splitlines()],
+        fix="sudo ./logi-rx.py --apply",
+    )
+
+
+# ------------------------------------------------------------------- revert
+
+
+def revert():
+    """Remove the udev rule, but only one this tool wrote."""
+    path = sysp(UDEV_RULE)
+    if not path.exists():
+        return make("revert", "skipped", f"{UDEV_RULE} is not present; nothing to do")
 
     try:
-        UDEV_RULE.parent.mkdir(parents=True, exist_ok=True)
-        UDEV_RULE.write_text(desired)
-        out.changed(f"Wrote {UDEV_RULE}")
+        current = path.read_text()
     except OSError as exc:
-        out.fail(f"Could not write rule: {exc}")
-        return
+        return make("revert", "unknown", f"Could not read {UDEV_RULE}: {exc}")
 
-    for cmd in (["udevadm", "control", "--reload"], ["udevadm", "trigger", "--subsystem-match=usb"]):
-        try:
-            subprocess.run(cmd, check=True, capture_output=True, timeout=30)
-            out.changed(" ".join(cmd))
-        except FileNotFoundError:
-            out.warn("udevadm not found; reboot to apply the rule")
-            break
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-            out.warn(f"{' '.join(cmd)} failed: {exc}")
+    if MANAGED_MARKER not in current:
+        # Somebody else's rule happens to live at this path. Deleting it would
+        # be destroying a file this tool did not create.
+        return make(
+            "revert",
+            "skipped",
+            f"{UDEV_RULE} was not written by this tool; leaving it alone",
+            detail=[
+                f"The managed marker ({MANAGED_MARKER}) is absent, so this file is",
+                "not ours to remove. Delete it by hand if you are sure.",
+            ],
+        )
 
-
-def revert(out):
-    out.header("Revert")
-    if not UDEV_RULE.exists():
-        out.info(f"{UDEV_RULE} is not present; nothing to do")
-        return
     try:
-        UDEV_RULE.unlink()
-        out.changed(f"Removed {UDEV_RULE}")
-        subprocess.run(["udevadm", "control", "--reload"], check=False, capture_output=True, timeout=30)
-        out.info("Runtime sysfs values are unchanged until reboot or re-plug")
+        path.unlink()
     except OSError as exc:
-        out.fail(f"Could not remove rule: {exc}")
+        return make("revert", "fail", f"Could not remove the rule: {exc}")
+
+    run(["udevadm", "control", "--reload"])
+    return make(
+        "revert",
+        "ok",
+        f"Removed {UDEV_RULE}",
+        detail=["Runtime sysfs values are unchanged until reboot or re-plug."],
+    )
 
 
-# ------------------------------------------------------------- watch mode
+# --------------------------------------------------------------- watch mode
+
+# struct input_event: two longs (timeval), then __u16, __u16, __s32
+EVENT_FMT = "llHHi"
+EVENT_SIZE = struct.calcsize(EVENT_FMT)
+EV_REL = 0x02
+REL_X = 0x00
+REL_Y = 0x01
 
 
 def find_pointer_event_device():
-    """Locate the evdev node for the Logitech pointer via /proc/bus/input/devices."""
+    """Locate the evdev node for the Logitech pointer.
+
+    Only an interface with a `mouse` handler is a pointer. The receiver also
+    presents a keyboard-only interface, and selecting that one would produce a
+    run with no motion at all."""
     try:
-        blob = PROC_INPUT.read_text()
+        blob = sysp(PROC_INPUT).read_text()
     except OSError:
         return None, None
 
@@ -509,184 +832,630 @@ def find_pointer_event_device():
     return None, None
 
 
-# struct input_event: two longs (timeval), then __u16, __u16, __s32
-EVENT_FMT = "llHHi"
-EVENT_SIZE = struct.calcsize(EVENT_FMT)
-EV_REL = 0x02
+def read_events(fh, duration, blocking=False):
+    """Read input_event structs into (timestamp, code, value) motion samples.
+
+    Uses the kernel's own event timestamp rather than the read time: it is more
+    accurate than userspace scheduling, and it makes the analysis deterministic
+    under test. Non-motion events are dropped here, so a keypress can never be
+    counted as pointer movement."""
+    samples = []
+    started = time.monotonic()
+    while True:
+        chunk = fh.read(EVENT_SIZE)
+        if not chunk or len(chunk) < EVENT_SIZE:
+            if blocking:
+                break  # end of stream
+            if time.monotonic() - started >= duration:
+                break
+            time.sleep(0.001)
+            continue
+        sec, usec, etype, code, value = struct.unpack(EVENT_FMT, chunk)
+        if etype != EV_REL or code not in (REL_X, REL_Y):
+            continue
+        samples.append((sec + usec / 1_000_000.0, code, value))
+        if not blocking and time.monotonic() - started >= duration:
+            break
+    return samples
 
 
-def watch(out, duration, gap_ms):
-    out.header("Dropout watch")
+def median(values):
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
 
+
+def _edge_velocity(samples, start, stop):
+    window = samples[max(0, start):stop]
+    if not window:
+        return 0.0
+    return sum(abs(value) for _, _, value in window) / len(window)
+
+
+def analyse(samples, gap_ms=None):
+    """Turn motion samples into gap statistics, a threshold, and classifications.
+
+    Pure: no I/O, no clock. Everything watch mode decides happens here, which is
+    what makes it testable without a receiver."""
+    report = {
+        "motion_events": len(samples),
+        "duration_s": None,
+        "median_gap_ms": None,
+        "median_delta": None,
+        "threshold_ms": None,
+        "threshold_source": None,
+        "median_ms": None,
+        "p99_ms": None,
+        "worst_ms": None,
+        "gaps": [],
+        "dropouts": 0,
+        "pauses": 0,
+        "axis_counts": {"x": 0, "y": 0},
+    }
+
+    for _, code, _ in samples:
+        if code == REL_X:
+            report["axis_counts"]["x"] += 1
+        elif code == REL_Y:
+            report["axis_counts"]["y"] += 1
+
+    if len(samples) < 2:
+        return report
+
+    report["duration_s"] = samples[-1][0] - samples[0][0]
+    intervals = [samples[i][0] - samples[i - 1][0] for i in range(1, len(samples))]
+    report["median_gap_ms"] = median(intervals) * 1000.0
+    report["median_delta"] = median([abs(value) for _, _, value in samples])
+
+    ordered = sorted(intervals)
+    report["median_ms"] = ordered[len(ordered) // 2] * 1000.0
+    report["p99_ms"] = ordered[min(len(ordered) - 1, int(len(ordered) * 0.99))] * 1000.0
+    report["worst_ms"] = ordered[-1] * 1000.0
+
+    if gap_ms is not None:
+        report["threshold_ms"] = float(gap_ms)
+        report["threshold_source"] = "explicit"
+    elif len(samples) >= MIN_CALIBRATION_EVENTS:
+        report["threshold_ms"] = GAP_MULTIPLIER * report["median_gap_ms"]
+        report["threshold_source"] = "calibrated"
+    else:
+        # Too few samples for a stable median. A fabricated threshold would be
+        # worse than saying the run was too short.
+        return report
+
+    floor = (report["median_delta"] or 0.0) * VELOCITY_FLOOR_FRAC
+    threshold_s = report["threshold_ms"] / 1000.0
+    edge = VELOCITY_EDGE_SAMPLES
+
+    for index in range(1, len(samples)):
+        interval = samples[index][0] - samples[index - 1][0]
+        if interval <= threshold_s:
+            continue
+        before = _edge_velocity(samples, index - edge, index)
+        after = _edge_velocity(samples, index, index + edge)
+        # A user pause tapers: the deltas either side shrink toward zero. A real
+        # dropout does not, it is full-velocity motion on both sides of a hole.
+        if floor > 0 and before < floor and after < floor:
+            classification = "pause"
+            report["pauses"] += 1
+        else:
+            classification = "dropout"
+            report["dropouts"] += 1
+        report["gaps"].append(
+            {
+                "at_s": samples[index][0] - samples[0][0],
+                "gap_ms": interval * 1000.0,
+                "classification": classification,
+                "velocity_before": before,
+                "velocity_after": after,
+            }
+        )
+
+    return report
+
+
+def watch_results(report, device_name, node):
+    """Turn an analyse() report into findings."""
+    detail = [f"Device: {device_name}", f"Node:   {node}"]
+
+    if report["motion_events"] < 2:
+        return [
+            make(
+                "watch",
+                "unknown",
+                "No motion recorded",
+                detail=detail
+                + [
+                    "The pointer has to be moving for this to measure anything.",
+                    "Nothing was recorded, so there is no result either way.",
+                ],
+            )
+        ]
+
+    detail += [
+        f"Motion events: {report['motion_events']}"
+        f"  (x {report['axis_counts']['x']}, y {report['axis_counts']['y']})",
+        f"Median interval: {report['median_gap_ms']:.1f} ms"
+        f"  ({1000.0 / report['median_gap_ms']:.0f} Hz nominal)"
+        if report["median_gap_ms"]
+        else "",
+        f"Median delta:    {report['median_delta']:.1f} counts",
+        f"p99 interval:    {report['p99_ms']:.1f} ms",
+        f"Worst interval:  {report['worst_ms']:.1f} ms",
+    ]
+    detail = [line for line in detail if line]
+
+    if report["threshold_source"] is None:
+        return [
+            make(
+                "watch",
+                "unknown",
+                f"Too few motion events to calibrate ({report['motion_events']} of {MIN_CALIBRATION_EVENTS})",
+                detail=detail
+                + [
+                    "The median interval is not stable enough to derive a threshold",
+                    "from, and inventing one would produce a confident wrong answer.",
+                    "Run for longer, or set one explicitly with --gap-ms.",
+                ],
+            )
+        ]
+
+    if report["threshold_source"] == "calibrated":
+        detail.append(
+            f"Threshold:       {report['threshold_ms']:.1f} ms "
+            f"({GAP_MULTIPLIER:.0f}x the median interval, calibrated to this device)"
+        )
+    else:
+        detail.append(f"Threshold:       {report['threshold_ms']:.1f} ms (set with --gap-ms)")
+
+    results = []
+    if report["pauses"]:
+        results.append(
+            make(
+                "watch",
+                "info",
+                f"{report['pauses']} gap(s) classified as you pausing, not dropouts",
+                detail=[
+                    "Motion tapered off before the gap and ramped back up after it,",
+                    "which is what letting go of the mouse looks like. A dropout has",
+                    "full-velocity motion on both sides.",
+                ]
+                + [
+                    f"    {gap['gap_ms']:7.1f} ms at t+{gap['at_s']:5.1f}s"
+                    f"   velocity {gap['velocity_before']:.1f} -> {gap['velocity_after']:.1f}"
+                    for gap in report["gaps"]
+                    if gap["classification"] == "pause"
+                ],
+                result_id="watch-pauses",
+            )
+        )
+
+    if not report["dropouts"]:
+        results.append(
+            make(
+                "watch",
+                "ok",
+                f"No dropouts above {report['threshold_ms']:.1f} ms",
+                detail=detail + ["This link is healthy at this distance."],
+                result_id="watch-dropouts",
+            )
+        )
+        return results
+
+    results.append(
+        make(
+            "watch",
+            "fail",
+            f"{report['dropouts']} dropout(s) above {report['threshold_ms']:.1f} ms",
+            detail=detail
+            + [""]
+            + [
+                f"    {gap['gap_ms']:7.1f} ms at t+{gap['at_s']:5.1f}s"
+                f"   velocity {gap['velocity_before']:.1f} -> {gap['velocity_after']:.1f}"
+                for gap in report["gaps"]
+                if gap["classification"] == "dropout"
+            ]
+            + [
+                "",
+                "Full-velocity motion either side of each gap, so these are the link",
+                "dropping reports rather than you pausing.",
+                "",
+                "Next steps, in order of how cheaply they settle it:",
+                "  1. Re-run from the same spot with the receiver on a different",
+                "     port. A large drop in the count means the old port was the",
+                "     problem, and USB 3 emissions sit right on top of 2.4 GHz.",
+                "  2. If nothing changes, the band itself is the suspect. rfscan in",
+                "     this repo maps 2.4 GHz occupancy and will tell you whether",
+                "     your WiFi is sitting on top of the receiver:",
+                "         rfscan",
+                "  3. If the band is clear too, it is distance or transmit power,",
+                "     and no amount of configuration will fix it.",
+                "",
+                "  --json makes the A/B comparison mechanical: save a run, move the",
+                "  dongle, and diff the two instead of eyeballing them.",
+            ],
+            result_id="watch-dropouts",
+        )
+    )
+    return results
+
+
+def run_watch(args):
+    """The I/O half of watch mode. Everything it decides lives in analyse()."""
     node, name = find_pointer_event_device()
     if not node:
-        out.fail(
-            "Could not find a Logitech pointer event device",
-            "Is the receiver plugged in and the pointer paired?",
-        )
-        return 1
+        return None, [
+            make(
+                "watch",
+                "unknown",
+                "Could not find a Logitech pointer event device",
+                detail=[
+                    "Looked for a Logitech entry in /proc/bus/input/devices with a",
+                    "'mouse' handler. Is the receiver plugged in and the pointer",
+                    "paired? A keyboard-only interface does not count.",
+                ],
+            )
+        ]
 
-    out.info(f"Device: {name}")
-    out.info(f"Node:   {node}")
-    print()
-    print(f"  Move the pointer CONTINUOUSLY for {duration}s. Do not pause - a pause")
-    print(f"  is indistinguishable from a dropout. Walk to the couch mid-test and")
-    print(f"  compare runs across different USB ports.")
-    print()
+    emit(f"  Move the pointer for {args.duration}s.")
+    emit("  Continuous motion gives the cleanest read, but pauses are now detected")
+    emit("  and reported separately rather than counted as dropouts.")
+    emit()
 
     try:
-        fh = open(node, "rb", buffering=0)
+        handle = open(node, "rb", buffering=0)
     except PermissionError:
-        out.fail(
-            f"Permission denied reading {node}",
-            "Run with sudo, or add yourself to the 'input' group and re-login.",
-        )
-        return 1
+        return None, [
+            make(
+                "watch",
+                "unknown",
+                f"Permission denied reading {node}",
+                detail=["Cannot measure anything without read access to the event node."],
+                fix='sudo usermod -aG input "$USER"   # then log back in',
+            )
+        ]
     except OSError as exc:
-        out.fail(f"Could not open {node}: {exc}")
-        return 1
-
-    os.set_blocking(fh.fileno(), False)
-
-    threshold = gap_ms / 1000.0
-    gaps = []
-    dropouts = []
-    last = None
-    started = time.monotonic()
-    total_events = 0
+        return None, [make("watch", "unknown", f"Could not open {node}: {exc}")]
 
     try:
-        while time.monotonic() - started < duration:
-            chunk = fh.read(EVENT_SIZE)
-            if not chunk or len(chunk) < EVENT_SIZE:
-                time.sleep(0.001)
-                continue
-
-            _, _, etype, _, _ = struct.unpack(EVENT_FMT, chunk)
-            if etype != EV_REL:
-                continue
-
-            now = time.monotonic()
-            total_events += 1
-            if last is not None:
-                gap = now - last
-                gaps.append(gap)
-                if gap > threshold:
-                    dropouts.append((now - started, gap))
-                    print(f"  {out._c('33', 'gap')} {gap * 1000:7.1f} ms at t+{now - started:5.1f}s")
-            last = now
+        os.set_blocking(handle.fileno(), False)
+        samples = read_events(handle, args.duration)
     except KeyboardInterrupt:
-        print("\n  interrupted")
+        samples = []
     finally:
-        fh.close()
+        handle.close()
 
-    print()
-    if not gaps:
-        out.warn("No motion recorded - the pointer has to be moving for this to mean anything")
-        return 1
-
-    ordered = sorted(gaps)
-    median = ordered[len(ordered) // 2] * 1000
-    p99 = ordered[int(len(ordered) * 0.99)] * 1000
-    worst = ordered[-1] * 1000
-
-    out.info(f"Motion events:  {total_events}")
-    out.info(f"Median gap:     {median:.1f} ms")
-    out.info(f"p99 gap:        {p99:.1f} ms")
-    out.info(f"Worst gap:      {worst:.1f} ms")
-    print()
-
-    if not dropouts:
-        out.ok(f"No gaps above {gap_ms} ms - this link is healthy at this distance")
-        return 0
-
-    out.fail(f"{len(dropouts)} gaps above {gap_ms} ms")
-    print()
-    print("  Re-run from the same spot with the receiver on a different port. A large")
-    print("  drop in the gap count means the old port was the problem (USB 3 emissions")
-    print("  sit right on top of the 2.4 GHz band). No change means it is distance,")
-    print("  transmit power, or 2.4 GHz congestion from your WiFi.")
-    return 1
+    report = analyse(samples, gap_ms=args.gap_ms)
+    return report, watch_results(report, name, node)
 
 
-# ------------------------------------------------------------------- main
+# ---------------------------------------------------------------- formatting
+
+WRAP_WIDTH = 70
+
+
+def safe_text(text):
+    """Printable on whatever encoding stdout actually has. Product strings and
+    device names are not guaranteed ASCII and the console may be POSIX."""
+    encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+    try:
+        text.encode(encoding)
+        return text
+    except UnicodeEncodeError:
+        return text.encode(encoding, "backslashreplace").decode(encoding, "replace")
+    except LookupError:
+        return text.encode("ascii", "backslashreplace").decode("ascii")
+
+
+def emit(text=""):
+    print(safe_text(text))
+
+
+def rule_char():
+    encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+    try:
+        "─".encode(encoding)
+        return "─"
+    except (UnicodeEncodeError, LookupError):
+        return "-"
+
+
+def wrap(text, width=WRAP_WIDTH):
+    lines = []
+    current = ""
+    for word in text.split():
+        if current and len(current) + 1 + len(word) > width:
+            lines.append(current)
+            current = word
+        else:
+            current = f"{current} {word}".strip()
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
+class Out:
+    TAGS = {
+        "ok": ("32", "[ ok ]"),
+        "warn": ("33", "[warn]"),
+        "fail": ("31", "[fail]"),
+        "unknown": ("35", "[ ?? ]"),
+        "skipped": ("90", "[skip]"),
+        "info": ("36", "[info]"),
+    }
+
+    def __init__(self, color=True):
+        self.color = color and sys.stdout.isatty()
+
+    def _c(self, code, text):
+        return f"\033[{code}m{text}\033[0m" if self.color else text
+
+    def header(self, text):
+        emit()
+        emit(self._c("1;36", text))
+        emit(self._c("36", rule_char() * len(text)))
+
+    def finding(self, res):
+        code, tag = self.TAGS.get(res["status"], ("0", "[    ]"))
+        lines = wrap(res["summary"])
+        emit(f"  {self._c(code, tag)} {lines[0]}")
+        for line in lines[1:]:
+            emit(f"         {line}")
+        for line in res["detail"]:
+            if not line:
+                emit()
+                continue
+            # Only wrap prose. A line that is indented or contains a run of
+            # spaces is a pre-formatted table row or a rule fragment, and
+            # collapsing its whitespace would destroy the column alignment it
+            # was written to have.
+            if line.startswith(" ") or "  " in line:
+                emit(f"         {self._c('90', line)}")
+                continue
+            for wrapped in wrap(line, WRAP_WIDTH):
+                emit(f"         {self._c('90', wrapped)}")
+        if res["fix"]:
+            emit(f"         {self._c('1', 'fix:')} {res['fix']}")
+
+
+# ------------------------------------------------------------------- runner
+
+
+def build_report(args):
+    report = {
+        "tool": "logi-rx",
+        "linux": is_linux(),
+        "mode": "watch" if args.watch else "revert" if args.revert else "audit",
+        "root": is_root(),
+        "receiver": None,
+        "other_logitech_devices": [],
+        "results": [],
+        "watch": None,
+        "applied": [],
+        "counts": {status: 0 for status in STATUS_ORDER},
+        "error": None,
+        "exit_code": NO_FINDINGS,
+    }
+
+    def finish():
+        for res in report["results"]:
+            report["counts"][res["status"]] = report["counts"].get(res["status"], 0) + 1
+        if report["error"]:
+            report["exit_code"] = COULD_NOT_DETERMINE
+        elif any(res["status"] in EXIT_STATUSES for res in report["results"]):
+            report["exit_code"] = FINDINGS
+        elif all(
+            res["status"] in ("unknown", "skipped", "info") for res in report["results"]
+        ) and report["results"]:
+            # Nothing was determined either way. Exiting 0 would claim a clean
+            # bill of health that was never established.
+            report["exit_code"] = COULD_NOT_DETERMINE
+        return report
+
+    if not report["linux"]:
+        report["error"] = "not-linux"
+        report["results"].append(
+            make("platform", "unknown", "This tool only works on Linux (it reads sysfs directly)")
+        )
+        return finish()
+
+    if args.watch:
+        watch_report, results = run_watch(args)
+        report["watch"] = watch_report
+        report["results"] = results
+        if any(res["status"] == "unknown" for res in results) and not any(
+            res["status"] in EXIT_STATUSES for res in results
+        ):
+            report["error"] = "watch-inconclusive"
+        return finish()
+
+    if args.revert:
+        if not is_root():
+            report["error"] = "needs-root"
+            report["results"].append(
+                make("revert", "unknown", "--revert needs root", fix="sudo ./logi-rx.py --revert")
+            )
+            return finish()
+        report["results"].append(revert())
+        return finish()
+
+    if args.apply and not is_root():
+        report["error"] = "needs-root"
+        report["results"].append(
+            make("apply", "unknown", "--apply needs root", fix="sudo ./logi-rx.py --apply")
+        )
+        return finish()
+
+    receivers = find_receivers()
+    if not receivers:
+        report["error"] = "no-device"
+        report["results"].append(
+            make(
+                "receiver",
+                "unknown",
+                "No Logitech USB devices found",
+                detail=["Is the receiver plugged in?"],
+                fix="lsusb -d 046d:",
+            )
+        )
+        return finish()
+
+    if args.device:
+        picked = [r for r in receivers if r["name"] == args.device]
+        if not picked:
+            report["error"] = "device-not-found"
+            report["results"].append(
+                make(
+                    "receiver",
+                    "unknown",
+                    f"No Logitech device at sysfs node {args.device}",
+                    detail=["Present: " + ", ".join(r["name"] for r in receivers)],
+                )
+            )
+            return finish()
+        receiver = picked[0]
+    else:
+        receiver = receivers[0]
+
+    report["receiver"] = receiver
+    report["other_logitech_devices"] = [
+        {"name": r["name"], "product": r["product"], "pid": r["pid"]}
+        for r in receivers
+        if r["name"] != receiver["name"]
+    ]
+
+    ctx = {"receiver": receiver, "apply": args.apply, "applied": report["applied"]}
+    for entry in CHECKS:
+        try:
+            produced = entry["fn"](ctx)
+        except Exception as exc:  # noqa: BLE001
+            produced = make(
+                entry["id"],
+                "unknown",
+                f"Check raised {type(exc).__name__}",
+                detail=[str(exc), "This is a bug in logi-rx, not a finding about your system."],
+            )
+        if produced is None:
+            continue
+        if isinstance(produced, dict):
+            produced = [produced]
+        for res in produced:
+            res["title"] = entry["title"]
+            report["results"].append(res)
+
+    return finish()
+
+
+def render(out, report):
+    if report["receiver"]:
+        out.header("Receiver")
+        rx = report["receiver"]
+        emit(f"  {rx['product']} [{LOGITECH_VID}:{rx['pid']}] at {rx['name']}")
+        for other in report["other_logitech_devices"]:
+            emit(f"  also present: {other['name']}  {other['product']} [{other['pid']}]")
+        if report["other_logitech_devices"]:
+            emit("  override the choice with --device NAME")
+
+    grouped = {status: [] for status in STATUS_ORDER}
+    for res in report["results"]:
+        grouped.setdefault(res["status"], []).append(res)
+
+    titles = {
+        "fail": "Failures",
+        "warn": "Warnings",
+        "unknown": "Could not determine",
+        "info": "Informational",
+        "skipped": "Not applicable",
+        "ok": "Passed",
+    }
+    for status in STATUS_ORDER:
+        group = grouped.get(status) or []
+        if not group:
+            continue
+        out.header(titles[status])
+        for res in group:
+            out.finding(res)
+
+    if report["applied"]:
+        out.header("Changes applied")
+        for change in report["applied"]:
+            emit(f"  {change}")
+
+    out.header("Summary")
+    counts = report["counts"]
+    emit(
+        "  "
+        + "  ".join(
+            f"{counts.get(status, 0)} {status}"
+            for status in ("fail", "warn", "unknown", "info", "skipped", "ok")
+        )
+    )
+    if counts.get("unknown"):
+        emit("  'could not determine' is not a pass and not a failure; it means the")
+        emit("  answer was not available.")
+    if counts.get("skipped"):
+        emit("  'not applicable' means the check does not apply to this device.")
+    emit()
+    if report["exit_code"] == NO_FINDINGS:
+        emit("  Nothing to fix.")
+    elif report["exit_code"] == FINDINGS and not report["applied"]:
+        emit("  Re-run with sudo --apply to fix what is fixable.")
+        emit("  Then: ./logi-rx.py --watch  to measure the link empirically.")
+
+
+# --------------------------------------------------------------------- main
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="Check and tune a Logitech wireless receiver on Linux.",
+        epilog=(
+            "Read-only by default: nothing changes unless you pass --apply, and "
+            "--revert undoes everything --apply does.\n\n"
+            "Exit codes: 0 nothing to fix, 1 findings to act on, 2 could not "
+            "determine (not Linux, no receiver, no read access, or a watch run "
+            "with nothing to measure)."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--apply", action="store_true", help="apply fixes (needs root)")
-    parser.add_argument("--revert", action="store_true", help="remove the udev rule")
+    parser.add_argument("--revert", action="store_true", help="remove the udev rule (needs root)")
     parser.add_argument("--watch", action="store_true", help="measure input dropouts")
-    parser.add_argument("--duration", type=int, default=30, help="watch duration in seconds")
-    parser.add_argument("--gap-ms", type=float, default=100.0, help="dropout threshold in ms")
+    parser.add_argument(
+        "--duration", type=int, default=DEFAULT_DURATION, help="watch duration in seconds"
+    )
+    parser.add_argument(
+        "--gap-ms",
+        type=float,
+        default=None,
+        help="dropout threshold in ms. Omit to calibrate to the device's own "
+        "report rate, which is almost always what you want.",
+    )
     parser.add_argument("--device", help="force a sysfs device name, e.g. 1-3")
+    parser.add_argument("--json", action="store_true", help="machine-readable output")
     parser.add_argument("--no-color", action="store_true", help="disable colour output")
     args = parser.parse_args()
 
-    out = Out(color=not args.no_color)
+    if args.json:
+        # Watch mode narrates to stdout while it runs, which would corrupt the
+        # JSON document. Silence it.
+        global emit
+        original = emit
+        emit = lambda text="": None  # noqa: E731
+        try:
+            report = build_report(args)
+        finally:
+            emit = original
+        print(json.dumps(report, indent=2, sort_keys=True, default=str))
+        return report["exit_code"]
 
-    if sys.platform != "linux":
-        out.fail("This script only works on Linux (it reads sysfs directly)")
-        return 2
-
-    if args.watch:
-        return watch(out, args.duration, args.gap_ms)
-
-    if args.revert:
-        if os.geteuid() != 0:
-            out.fail("--revert needs root")
-            return 1
-        revert(out)
-        return 0
-
-    if args.apply and os.geteuid() != 0:
-        out.fail("--apply needs root; re-run with sudo")
-        return 1
-
-    receivers = find_receivers()
-    if not receivers:
-        out.fail(
-            "No Logitech USB devices found",
-            "Is the receiver plugged in? Check with: lsusb -d 046d:",
-        )
-        return 1
-
-    if args.device:
-        picked = [r for r in receivers if r["name"] == args.device]
-        if not picked:
-            out.fail(f"No Logitech device at sysfs node {args.device}")
-            return 1
-        rx = picked[0]
-    else:
-        rx = receivers[0]
-        if len(receivers) > 1:
-            out.info(f"{len(receivers)} Logitech devices present; using {rx['name']}")
-            for other in receivers[1:]:
-                out.info(f"  also: {other['name']} {other['product']} [{other['pid']}]")
-            out.info("Override with --device NAME")
-
-    check_topology(out, rx)
-    check_dj_module(out)
-    check_autosuspend(out, rx, args.apply)
-    check_wakeup(out, rx, args.apply)
-    check_acpi_wakeup(out, rx)
-    check_battery(out)
-    check_solaar(out)
-    check_udev(out, rx, args.apply)
-
-    out.header("Summary")
-    if out.fixes:
-        for fix in out.fixes:
-            out.info(f"changed: {fix}")
-    if not out.problems:
-        out.ok("Nothing to fix")
-    elif not args.apply:
-        out.info(f"{len(out.problems)} item(s) flagged. Re-run with sudo --apply to fix.")
-        out.info("Then: ./logi-rx.py --watch  to measure the link empirically.")
-    return 0
+    report = build_report(args)
+    render(Out(color=not args.no_color), report)
+    return report["exit_code"]
 
 
 if __name__ == "__main__":
