@@ -21,7 +21,7 @@ venv/
 Thumbs.db
 desktop.ini
 
-# Local scratch — keep experiments out of the repo
+# Local scratch - keep experiments out of the repo
 scratch/
 tmp/
 *.local

@@ -5,7 +5,7 @@ Audit and tune a Logitech wireless receiver on Linux.
 Wireless receiver problems on Linux tend to get misdiagnosed as range problems
 when they are actually power-management or configuration problems. `logi-rx`
 checks the settings that matter, fixes the ones it safely can, and gives you a
-measurement tool for the ones it cannot — so you can tell an RF problem from a
+measurement tool for the ones it cannot - so you can tell an RF problem from a
 software problem instead of guessing.
 
 Standard library only. No dependencies.
@@ -56,7 +56,7 @@ and is easy to mistake for a range problem. `--apply` sets it to `on`.
 ### USB remote wakeup
 
 Checks `power/wakeup`. When disabled, the keyboard cannot resume the machine from
-suspend — the classic complaint about Logitech media keyboards, and a settings
+suspend - the classic complaint about Logitech media keyboards, and a settings
 problem rather than a hardware limitation. `--apply` sets it to `enabled`.
 
 If the device does not expose `power/wakeup` at all, it did not advertise
@@ -65,7 +65,7 @@ remote-wakeup capability and genuinely cannot resume the machine.
 ### ACPI controller wakeup
 
 Resolves the receiver's parent xHCI controller and reports its `/proc/acpi/wakeup`
-state. **This gates everything above** — if the controller is masked in ACPI, the
+state. **This gates everything above** - if the controller is masked in ACPI, the
 per-port `power/wakeup` setting you just enabled does nothing.
 
 `logi-rx` deliberately will not change this for you. Writing a device name to
@@ -128,11 +128,11 @@ indistinguishable from a dropout on the link's end.
 The point is A/B testing. Run it from where you actually sit, move the receiver
 to a different port or a different position, and run it again from the same spot:
 
-- **Gap count drops a lot** — the old port or placement was the problem.
-- **No change** — it is distance, transmit power, or 2.4 GHz congestion from
+- **Gap count drops a lot** - the old port or placement was the problem.
+- **No change** - it is distance, transmit power, or 2.4 GHz congestion from
   your WiFi. Check whether your AP is sitting on an overlapping channel before
   blaming the hardware.
-- **Clean run at your desk, bad run at the couch** — it is range, and no amount
+- **Clean run at your desk, bad run at the couch** - it is range, and no amount
   of configuration will fix it. The transmitter is the limit.
 
 Exits nonzero when dropouts are found, so it scripts cleanly.
@@ -171,7 +171,7 @@ override.
 ## Notes
 
 Detection does not depend on the built-in list of receiver product IDs being
-complete — the list only ranks candidates when several Logitech devices are
+complete - the list only ranks candidates when several Logitech devices are
 attached. Any Logitech USB device can be targeted with `--device`.
 
 The tool reads sysfs directly and does not shell out for its checks. The only

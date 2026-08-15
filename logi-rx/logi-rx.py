@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-logi-rx.py — Logitech wireless receiver checker/tuner for Linux.
+logi-rx.py - Logitech wireless receiver checker/tuner for Linux.
 
 Covers the things that actually matter for a couch-distance HTPC receiver:
 
@@ -299,7 +299,7 @@ def check_wakeup(out, rx, apply_changes):
         out.ok("Remote wakeup is enabled")
     else:
         out.warn(
-            "Remote wakeup is disabled — keyboard will not resume the machine",
+            "Remote wakeup is disabled - keyboard will not resume the machine",
             "This is the classic K400 complaint. It is a settings problem, not a\n"
             "         hardware limitation.",
         )
@@ -355,7 +355,7 @@ def check_acpi_wakeup(out, rx):
                 )
 
     if pci and not matched:
-        out.info(f"No /proc/acpi/wakeup entry references {pci} — usually fine")
+        out.info(f"No /proc/acpi/wakeup entry references {pci} - usually fine")
 
 
 def check_battery(out):
@@ -408,7 +408,7 @@ def check_solaar(out):
     if which("solaar"):
         out.ok("solaar is installed")
     else:
-        out.info("solaar not found — optional, but handy for pairing and remapping")
+        out.info("solaar not found - optional, but handy for pairing and remapping")
         out.info("Arch/CachyOS:  sudo pacman -S solaar")
 
 
@@ -417,7 +417,7 @@ def check_solaar(out):
 
 def build_rule(rx):
     return (
-        "# Managed by logi-rx.py — Logitech receiver: keep awake, allow resume.\n"
+        "# Managed by logi-rx.py - Logitech receiver: keep awake, allow resume.\n"
         "# Disables runtime autosuspend and enables USB remote wakeup.\n"
         'ACTION=="add", SUBSYSTEM=="usb", '
         f'ATTR{{idVendor}}=="{LOGITECH_VID}", ATTR{{idProduct}}=="{rx["pid"]}", '
@@ -438,7 +438,7 @@ def check_udev(out, rx, apply_changes):
         out.warn(f"{UDEV_RULE} exists but does not match this receiver's PID")
     else:
         out.warn(
-            "No persistent rule — runtime settings are lost on reboot or re-plug",
+            "No persistent rule - runtime settings are lost on reboot or re-plug",
             f"Would install: {UDEV_RULE}",
         )
 
@@ -529,7 +529,7 @@ def watch(out, duration, gap_ms):
     out.info(f"Device: {name}")
     out.info(f"Node:   {node}")
     print()
-    print(f"  Move the pointer CONTINUOUSLY for {duration}s. Do not pause — a pause")
+    print(f"  Move the pointer CONTINUOUSLY for {duration}s. Do not pause - a pause")
     print(f"  is indistinguishable from a dropout. Walk to the couch mid-test and")
     print(f"  compare runs across different USB ports.")
     print()
@@ -582,7 +582,7 @@ def watch(out, duration, gap_ms):
 
     print()
     if not gaps:
-        out.warn("No motion recorded — the pointer has to be moving for this to mean anything")
+        out.warn("No motion recorded - the pointer has to be moving for this to mean anything")
         return 1
 
     ordered = sorted(gaps)
@@ -597,7 +597,7 @@ def watch(out, duration, gap_ms):
     print()
 
     if not dropouts:
-        out.ok(f"No gaps above {gap_ms} ms — this link is healthy at this distance")
+        out.ok(f"No gaps above {gap_ms} ms - this link is healthy at this distance")
         return 0
 
     out.fail(f"{len(dropouts)} gaps above {gap_ms} ms")

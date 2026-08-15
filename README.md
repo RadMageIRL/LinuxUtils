@@ -34,7 +34,7 @@ so `logi-rx/logi-rx.py` becomes `logi-rx`. It creates the directory if needed
 and will not overwrite an existing file it did not create. Pass `--uninstall`
 to remove the symlinks.
 
-Nothing is installed system-wide and nothing is copied — the symlinks point back
+Nothing is installed system-wide and nothing is copied - the symlinks point back
 at the clone, so `git pull` updates the tools in place.
 
 ## Requirements
