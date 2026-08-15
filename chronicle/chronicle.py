@@ -1285,6 +1285,13 @@ def render(out, report):
         "guessing you could no longer trust the parts it is certain about."
     ):
         emit(f"  {line}")
+    emit()
+    for line in wrap(
+        "For what changed rather than when, portwatch in this repo diffs listening "
+        "sockets against a baseline: the two answer the same question on different "
+        "axes."
+    ):
+        emit(f"  {line}")
 
 
 # --------------------------------------------------------------------- main

@@ -849,6 +849,16 @@ class TestAdjacencyDiscipline(TreeCase):
         self.assertIn("adjacency", text)
         self.assertIn("does not assign cause", text.replace("\n", " "))
 
+    def test_output_points_at_portwatch_for_the_other_axis(self):
+        # The reference is mutual: portwatch names chronicle in turn.
+        self.install_pacman_log()
+        self.stub_journal()
+        report = chronicle.build_report(Args(since="2026-08-01"))
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            chronicle.render(chronicle.Out(color=False), report)
+        self.assertIn("portwatch", buffer.getvalue())
+
     def test_unit_failure_finding_does_not_name_a_culprit(self):
         self.install_pacman_log()
         self.stub_journal()

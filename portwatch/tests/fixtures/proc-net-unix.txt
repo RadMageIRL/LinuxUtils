@@ -1,0 +1,4 @@
+Num       RefCount Protocol Flags    Type St Inode Path
+ffff0000: 00000002 00000000 00010000 0001 01 100040 /run/systemd/private
+ffff0001: 00000003 00000000 00000000 0001 03 100041 /run/dbus/system_bus_socket
+ffff0002: 00000002 00000000 00010000 0001 01 100042 /run/docker.sock
