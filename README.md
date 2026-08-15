@@ -35,6 +35,7 @@ never shares a code with one that found a problem.
 | [`logi-rx`](logi-rx/) | Audit and tune a Logitech wireless receiver: USB autosuspend, remote wakeup, ACPI gating, battery, and a link-quality test that calibrates its dropout threshold to the device's own report rate and tells a real dropout from you letting go of the mouse. |
 | [`rfscan`](rfscan/) | Map 2.4 GHz channel occupancy weighted by signal strength and recommend a quieter channel for your access point. Read-only, unprivileged, regulatory-domain aware. |
 | [`freshcheck`](freshcheck/) | Post-install and post-update audit: running kernel vs installed modules, microcode, TRIM, journal size, swap and zram, CPU scaling, time sync, filesystem headroom, failed units. Reports fixes, never applies them. |
+| [`chronicle`](chronicle/) | What changed on this machine, and when. Merges the package log, journal boots and unit failures, and `/etc` mtimes into one timeline. Orders and labels events; never claims one caused another. |
 
 ## Install
 

@@ -1,0 +1,5 @@
+{"__REALTIME_TIMESTAMP": "1786528800000000", "_BOOT_ID": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "MESSAGE": "Linux version 6.11.4-arch1-1"}
+{"__REALTIME_TIMESTAMP": "1786545590000000", "_BOOT_ID": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "MESSAGE": "Reached target Shutdown."}
+{"__REALTIME_TIMESTAMP": "1786546020000000", "_BOOT_ID": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "MESSAGE": "Linux version 6.11.4-arch1-1"}
+{"__REALTIME_TIMESTAMP": "1786553090000000", "_BOOT_ID": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "MESSAGE": "Reached target Shutdown."}
+{"__REALTIME_TIMESTAMP": "1786554900000000", "_BOOT_ID": "cccccccccccccccccccccccccccccccc", "MESSAGE": "Linux version 6.11.5-arch1-1"}

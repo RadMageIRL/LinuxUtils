@@ -26,3 +26,8 @@ scratch/
 tmp/
 *.local
 *.log
+
+# Captured logs used as test fixtures are repo content, not scratch. Without
+# this the *.log rule above silently drops them and the suite fails on a fresh
+# clone with a missing-fixture error that points nowhere near the cause.
+!*/tests/fixtures/*.log

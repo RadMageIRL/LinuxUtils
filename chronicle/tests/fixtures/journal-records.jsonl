@@ -1,0 +1,10 @@
+{"__REALTIME_TIMESTAMP": "1786528800000000", "_BOOT_ID": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "MESSAGE": "Linux version 6.11.4-arch1-1 (linux@archlinux) #1 SMP PREEMPT_DYNAMIC"}
+{"__REALTIME_TIMESTAMP": "1786528805000000", "_BOOT_ID": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "MESSAGE": "Reached target Multi-User System."}
+{"__REALTIME_TIMESTAMP": "1786545590000000", "_BOOT_ID": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "MESSAGE": "Reached target Shutdown."}
+{"__REALTIME_TIMESTAMP": "1786546020000000", "_BOOT_ID": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "MESSAGE": "Linux version 6.11.4-arch1-1 (linux@archlinux) #1 SMP PREEMPT_DYNAMIC"}
+{"__REALTIME_TIMESTAMP": "1786546030000000", "_BOOT_ID": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "MESSAGE": "Reached target Multi-User System."}
+{"__REALTIME_TIMESTAMP": "1786550000000000", "_BOOT_ID": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "MESSAGE": "usb 1-3: new full-speed USB device number 4 using xhci_hcd"}
+{"__REALTIME_TIMESTAMP": "1786554900000000", "_BOOT_ID": "cccccccccccccccccccccccccccccccc", "MESSAGE": "Linux version 6.11.5-arch1-1 (linux@archlinux) #1 SMP PREEMPT_DYNAMIC"}
+{"__REALTIME_TIMESTAMP": "1786554910000000", "_BOOT_ID": "cccccccccccccccccccccccccccccccc", "MESSAGE": "Failed to start Load Kernel Modules.", "UNIT": "systemd-modules-load.service"}
+{"__REALTIME_TIMESTAMP": "1786554911000000", "_BOOT_ID": "cccccccccccccccccccccccccccccccc", "MESSAGE": "systemd-modules-load.service: Failed with result 'exit-code'.", "UNIT": "systemd-modules-load.service"}
+{"__REALTIME_TIMESTAMP": "1786554930000000", "_BOOT_ID": "cccccccccccccccccccccccccccccccc", "MESSAGE": "Reached target Multi-User System."}

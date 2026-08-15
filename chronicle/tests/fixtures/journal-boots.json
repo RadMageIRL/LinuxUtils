@@ -1,0 +1,20 @@
+[
+	{
+		"index" : -2,
+		"boot_id" : "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"first_entry" : 1786528800000000,
+		"last_entry" : 1786545600000000
+	},
+	{
+		"index" : -1,
+		"boot_id" : "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"first_entry" : 1786546020000000,
+		"last_entry" : 1786553100000000
+	},
+	{
+		"index" : 0,
+		"boot_id" : "cccccccccccccccccccccccccccccccc",
+		"first_entry" : 1786554900000000,
+		"last_entry" : 1786561200000000
+	}
+]

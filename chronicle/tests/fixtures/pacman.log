@@ -1,0 +1,70 @@
+[2015-09-16 15:47] [PACMAN] Running 'pacman -S vim'
+[2015-09-16 15:47] [PACMAN] installed vim (7.4.865-1)
+[2015-09-16 15:48] [PACMAN] Running 'pacman -R nano'
+[2015-09-16 15:48] [PACMAN] removed nano (2.4.2-1)
+[2016-01-02 09:12] [PACMAN] upgraded openssl (1.0.2d-1 -> 1.0.2e-1)
+this line has no bracket structure at all and must be skipped
+[NOT-A-TIMESTAMP] [ALPM] upgraded ghost (1 -> 2)
+[2026-08-10T09:15:44+0100] [PACMAN] Running 'pacman -S ripgrep'
+[2026-08-10T09:15:45+0100] [ALPM] transaction started
+[2026-08-10T09:15:45+0100] [ALPM] installed ripgrep (14.1.0-1)
+[2026-08-10T09:15:46+0100] [ALPM] transaction completed
+[2026-08-10T18:02:00+0100] [ALPM] warning: /etc/pacman.conf installed as /etc/pacman.conf.pacnew
+[2026-08-11T15:00:02+0100] [PACMAN] Running 'pacman -Syu'
+[2026-08-11T15:00:09+0100] [ALPM] transaction started
+[2026-08-11T15:00:10+0100] [ALPM] upgraded acl (1.0-1 -> 1.1-1)
+[2026-08-11T15:00:11+0100] [ALPM] upgraded archlinux-keyring (1.0-2 -> 1.1-2)
+[2026-08-11T15:00:12+0100] [ALPM] upgraded attr (1.0-3 -> 1.1-3)
+[2026-08-11T15:00:13+0100] [ALPM] upgraded audit (1.0-1 -> 1.1-1)
+[2026-08-11T15:00:14+0100] [ALPM] upgraded bash (1.0-2 -> 1.1-2)
+[2026-08-11T15:00:15+0100] [ALPM] upgraded binutils (1.0-3 -> 1.1-3)
+[2026-08-11T15:00:16+0100] [ALPM] upgraded bzip2 (1.0-1 -> 1.1-1)
+[2026-08-11T15:00:17+0100] [ALPM] upgraded ca-certificates (1.0-2 -> 1.1-2)
+[2026-08-11T15:00:18+0100] [ALPM] upgraded coreutils (1.0-3 -> 1.1-3)
+[2026-08-11T15:00:19+0100] [ALPM] upgraded cryptsetup (1.0-1 -> 1.1-1)
+[2026-08-11T15:00:20+0100] [ALPM] upgraded curl (1.0-2 -> 1.1-2)
+[2026-08-11T15:00:21+0100] [ALPM] upgraded dbus (1.0-3 -> 1.1-3)
+[2026-08-11T15:00:22+0100] [ALPM] upgraded device-mapper (1.0-1 -> 1.1-1)
+[2026-08-11T15:00:23+0100] [ALPM] upgraded diffutils (1.0-2 -> 1.1-2)
+[2026-08-11T15:00:24+0100] [ALPM] upgraded e2fsprogs (1.0-3 -> 1.1-3)
+[2026-08-11T15:00:25+0100] [ALPM] upgraded expat (1.0-1 -> 1.1-1)
+[2026-08-11T15:00:26+0100] [ALPM] upgraded file (1.0-2 -> 1.1-2)
+[2026-08-11T15:00:27+0100] [ALPM] upgraded filesystem (1.0-3 -> 1.1-3)
+[2026-08-11T15:00:28+0100] [ALPM] upgraded findutils (1.0-1 -> 1.1-1)
+[2026-08-11T15:00:29+0100] [ALPM] upgraded gawk (1.0-2 -> 1.1-2)
+[2026-08-11T15:00:30+0100] [ALPM] upgraded gcc-libs (1.0-3 -> 1.1-3)
+[2026-08-11T15:00:31+0100] [ALPM] upgraded gdbm (1.0-1 -> 1.1-1)
+[2026-08-11T15:00:32+0100] [ALPM] upgraded gettext (1.0-2 -> 1.1-2)
+[2026-08-11T15:00:33+0100] [ALPM] upgraded glib2 (1.0-3 -> 1.1-3)
+[2026-08-11T15:00:34+0100] [ALPM] upgraded gmp (1.0-1 -> 1.1-1)
+[2026-08-11T15:00:35+0100] [ALPM] upgraded gnupg (1.0-2 -> 1.1-2)
+[2026-08-11T15:00:36+0100] [ALPM] upgraded gnutls (1.0-3 -> 1.1-3)
+[2026-08-11T15:00:37+0100] [ALPM] upgraded gpgme (1.0-1 -> 1.1-1)
+[2026-08-11T15:00:38+0100] [ALPM] upgraded grep (1.0-2 -> 1.1-2)
+[2026-08-11T15:00:39+0100] [ALPM] upgraded gzip (1.0-3 -> 1.1-3)
+[2026-08-11T15:00:40+0100] [ALPM] upgraded iproute2 (1.0-1 -> 1.1-1)
+[2026-08-11T15:00:41+0100] [ALPM] upgraded iptables (1.0-2 -> 1.1-2)
+[2026-08-11T15:00:42+0100] [ALPM] upgraded iputils (1.0-3 -> 1.1-3)
+[2026-08-11T15:00:43+0100] [ALPM] upgraded json-c (1.0-1 -> 1.1-1)
+[2026-08-11T15:00:44+0100] [ALPM] upgraded kbd (1.0-2 -> 1.1-2)
+[2026-08-11T15:00:45+0100] [ALPM] upgraded keyutils (1.0-3 -> 1.1-3)
+[2026-08-11T15:00:46+0100] [ALPM] upgraded kmod (1.0-1 -> 1.1-1)
+[2026-08-11T15:00:47+0100] [ALPM] upgraded krb5 (1.0-2 -> 1.1-2)
+[2026-08-11T15:00:48+0100] [ALPM] upgraded ldns (1.0-3 -> 1.1-3)
+[2026-08-11T15:00:49+0100] [ALPM] upgraded less (1.0-1 -> 1.1-1)
+[2026-08-11T15:00:10+0100] [ALPM] upgraded libarchive (1.0-2 -> 1.1-2)
+[2026-08-11T15:00:11+0100] [ALPM] upgraded libassuan (1.0-3 -> 1.1-3)
+[2026-08-11T15:00:12+0100] [ALPM] upgraded libcap (1.0-1 -> 1.1-1)
+[2026-08-11T15:00:13+0100] [ALPM] upgraded libelf (1.0-2 -> 1.1-2)
+[2026-08-11T15:00:31+0100] [ALPM] upgraded linux (6.11.4-1 -> 6.11.5-1)
+[2026-08-11T15:00:33+0100] [ALPM] upgraded mkinitcpio (37-2 -> 38-1)
+[2026-08-11T15:00:35+0100] [ALPM] upgraded systemd (256.5-1 -> 256.7-1)
+[2026-08-11T15:00:40+0100] [ALPM-SCRIPTLET] ==> Building initramfs
+[2026-08-11T15:00:58+0100] [ALPM] transaction completed
+[2026-08-12T08:30:00+0100] [PACMAN] Running 'pacman -U /var/cache/pacman/pkg/mesa-24.1.0-1-x86_64.pkg.tar.zst'
+[2026-08-12T08:30:01+0100] [ALPM] transaction started
+[2026-08-12T08:30:02+0100] [ALPM] downgraded mesa (24.2.0-1 -> 24.1.0-1)
+[2026-08-12T08:30:03+0100] [ALPM] transaction completed
+[2026-08-12T09:00:00+0100] [ALPM] transaction started
+[2026-08-12T09:00:01+0100] [ALPM] removed obsolete-thing (3.2-1)
+[2026-08-12T09:00:02+0100] [ALPM] transaction completed
