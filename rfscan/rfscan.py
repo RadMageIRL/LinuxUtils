@@ -67,6 +67,21 @@ OVERLAP_SPAN_MHZ = 25.0
 # two in power; anything less is inside the noise of where you put the router.
 WORTH_CHANGING_DB = 3.0
 
+# Channel 14 is Japan-only AND DSSS-only: no OFDM carrier is permitted there, so
+# an 802.11g/n/ax AP cannot use it at all. It is excluded from candidacy even
+# where the regulatory domain reports it legal, because recommending it to a
+# modern AP is actively harmful rather than merely suboptimal. Its occupancy is
+# still measured and displayed, since a transmitter there still lands on 13.
+DSSS_ONLY_CHANNELS = {14}
+
+# Exit codes. The rule is that 1 means, and only means, "a change is worth
+# making". Anything that produced no answer at all is 2, so that a cold scan
+# cache is never mistaken for a congested band. This deliberately differs from
+# the original spec, which had exit 1 cover both; see README.
+NO_ACTION_NEEDED = 0
+ACTION_WORTHWHILE = 1
+COULD_NOT_DETERMINE = 2
+
 BAR_WIDTH = 34
 WRAP_WIDTH = 68
 
@@ -418,19 +433,25 @@ def parse_bss_block(lines):
         return None
 
     offset = bss.pop("secondary_offset", None)
+    secondary_off_grid = False
     if offset is not None and bss["band"] == "2.4":
         secondary = bss["channel"] + (4 * offset)
         if 1 <= secondary <= 14:
             bss["secondary_channel"] = secondary
             bss["width_mhz"] = 40
+        else:
+            # HT operation declared a 40 MHz pairing whose secondary falls off
+            # the channel grid. The AP is not 20 MHz; we just cannot place the
+            # other half, so this must not be recorded as a measured 20 MHz.
+            secondary_off_grid = True
+
     if bss["width_mhz"] is not None:
         bss["width_assumed"] = False
     elif bss["band"] == "2.4":
         bss["width_mhz"] = 20
-        # Only an assumption when there was no HT operation element to read. If
-        # HT operation was present and said "no secondary", 20 MHz is a
-        # reading, not a guess, and must not be reported as one.
-        bss["width_assumed"] = not saw_ht_operation
+        # Only a reading when HT operation was present AND placed the carrier.
+        # Otherwise 20 MHz is a fallback and has to be labelled as one.
+        bss["width_assumed"] = (not saw_ht_operation) or secondary_off_grid
     else:
         # Outside 2.4 GHz the width is not modelled, so claiming 20 MHz would
         # be asserting something never measured. Leave it unknown.
@@ -642,18 +663,26 @@ def overlap_weight(freq_a, freq_b):
     return (OVERLAP_SPAN_MHZ - distance) / OVERLAP_SPAN_MHZ
 
 
-def occupancy_2ghz(networks):
+def occupancy_2ghz(networks, exclude_bssid=None):
     """Weighted score and AP count per 2.4 GHz channel.
 
     Score is a sum of LINEAR power (mW), spread across the channels each BSS
     overlaps. A 40 MHz AP is modelled as two half-power 20 MHz carriers, one
-    on the primary and one on the secondary."""
+    on the primary and one on the secondary.
+
+    exclude_bssid drops your own access point. It has to be dropped, because it
+    is usually the loudest thing in the scan and it sits on the channel you are
+    being asked whether to leave. Counting it would inflate the current channel
+    against every alternative and bias the tool toward always recommending a
+    move. Your own AP is not contention: it moves with you."""
     scores = {channel: 0.0 for channel in CHANNELS_2GHZ}
     counts = {channel: 0 for channel in CHANNELS_2GHZ}
     unweighted = 0
 
     for bss in networks:
         if bss["band"] != "2.4":
+            continue
+        if exclude_bssid and bss.get("bssid") == exclude_bssid:
             continue
         channel = bss["channel"]
         if channel in counts:
@@ -703,14 +732,27 @@ def occupancy_5ghz(networks):
 def pick_candidates(permitted):
     """The legal non-overlapping set to choose between.
 
+    Channel 14 is dropped outright even where the domain permits it: it is
+    DSSS-only, so an OFDM access point cannot use it at all, and offering it
+    would be worse than offering nothing.
+
+    Channel 12 never appears here for a different reason. It is not a member of
+    any standard non-overlapping set, so it is never a candidate and the
+    channel-13 compatibility hysteresis never has occasion to apply to it.
+
     13 is included where legal: it is clear of 1 and 6, and in practice it is
     often the quietest channel in a domain that allows it precisely because
-    most hardware ships defaulted to the 1/6/11 set."""
-    candidates = [channel for channel in NON_OVERLAPPING if channel in permitted]
-    if 13 in permitted:
+    most hardware ships defaulted to the 1/6/11 set. Whether it is actually
+    taken is decided by the hysteresis in recommend()."""
+    usable = [channel for channel in permitted if channel not in DSSS_ONLY_CHANNELS]
+    candidates = [channel for channel in NON_OVERLAPPING if channel in usable]
+    if 13 in usable:
         candidates.append(13)
     if not candidates:
-        candidates = sorted(permitted)[:1]
+        # A domain permitting none of 1/6/11/13 is not one this tool has seen.
+        # Offer the lowest usable channel rather than nothing, but never a
+        # DSSS-only one.
+        candidates = sorted(usable)[:1]
     return candidates
 
 
@@ -904,6 +946,7 @@ def build_result(args):
             "fell_back": None,
         },
         "associated": None,
+        "excluded_own_bss": None,
         "channels_2ghz": [],
         "channels_5ghz": [],
         "networks": [],
@@ -929,26 +972,26 @@ def build_result(args):
         ],
         "warnings": [],
         "error": None,
-        "exit_code": 0,
+        "exit_code": NO_ACTION_NEEDED,
     }
 
     if not result["linux"]:
         result["error"] = "not-linux"
-        result["exit_code"] = 2
+        result["exit_code"] = COULD_NOT_DETERMINE
         return result
 
     interfaces = wireless_interfaces()
     result["interfaces_found"] = interfaces
     if not interfaces:
         result["error"] = "no-wireless-interface"
-        result["exit_code"] = 2
+        result["exit_code"] = COULD_NOT_DETERMINE
         return result
 
     if args.iface:
         chosen = next((i for i in interfaces if i["name"] == args.iface), None)
         if chosen is None:
             result["error"] = "iface-not-found"
-            result["exit_code"] = 2
+            result["exit_code"] = COULD_NOT_DETERMINE
             return result
     else:
         chosen = interfaces[0]
@@ -982,7 +1025,7 @@ def build_result(args):
             result["error"] = "no-data"
             if error:
                 result["warnings"].append(error)
-        result["exit_code"] = 1
+        result["exit_code"] = COULD_NOT_DETERMINE
         return result
 
     result["networks"] = networks
@@ -992,7 +1035,7 @@ def build_result(args):
         # An empty cache is not an empty band. Freshly booted machines that
         # have not scanned yet look exactly like this.
         result["error"] = "empty-scan-cache"
-        result["exit_code"] = 1
+        result["exit_code"] = COULD_NOT_DETERMINE
         return result
 
     ages = [n["last_seen_ms"] for n in networks if n.get("last_seen_ms") is not None]
@@ -1013,7 +1056,9 @@ def build_result(args):
                 "channel": marked["channel"],
             }
 
-    scores, counts, unweighted = occupancy_2ghz(networks)
+    own_bssid = (result["associated"] or {}).get("bssid")
+    result["excluded_own_bss"] = own_bssid
+    scores, counts, unweighted = occupancy_2ghz(networks, exclude_bssid=own_bssid)
     result["unweighted_count"] = unweighted
     if unweighted:
         result["warnings"].append(
@@ -1034,6 +1079,9 @@ def build_result(args):
             "channel": channel,
             "freq": channel_to_freq(channel),
             "legal": channel in permitted,
+            # Legal but unusable by an OFDM AP. Distinct from illegal, and the
+            # reason it is never recommended even in a domain that allows it.
+            "dsss_only": channel in DSSS_ONLY_CHANNELS,
             "ap_count": counts[channel],
             "score": scores[channel],
             "score_relative": (
@@ -1054,8 +1102,15 @@ def build_result(args):
         scores, candidates, current_channel, result["weighting_available"]
     )
 
-    if result["recommendation"]["worth_changing"]:
-        result["exit_code"] = 1
+    recommendation = result["recommendation"]
+    if recommendation["worth_changing"]:
+        result["exit_code"] = ACTION_WORTHWHILE
+    elif recommendation["best_channel"] is None or recommendation["current_channel"] is None:
+        # A verdict was not reached: either the channels could not be ranked
+        # (nmcli reports quality, not power) or there is no current channel to
+        # compare against. Exiting 0 here would assert "no move is worth
+        # making", which is a different and unearned claim.
+        result["exit_code"] = COULD_NOT_DETERMINE
     return result
 
 
@@ -1183,11 +1238,16 @@ def render_histogram(out, result):
     for row in rows:
         channel = row["channel"]
         magnitude = row["score_relative"] if weighted else row["ap_count"]
-        if not row["legal"]:
+        if not row["legal"] or row["dsss_only"]:
             # Pad before colouring: escape codes have width on the terminal of
             # zero but length in the string, so padding a coloured value breaks
             # the column alignment of every row around it.
-            label = f"{'not permitted in this domain':<{BAR_WIDTH}}"
+            note = (
+                "802.11b only, not usable by an OFDM AP"
+                if row["legal"]
+                else "not permitted in this domain"
+            )
+            label = f"{note:<{BAR_WIDTH}}"
             marker = "  <-- current" if channel == current else ""
             # The AP count is still shown. A neighbour transmitting on a channel
             # you may not legally use still lands on top of the ones you can.
@@ -1209,8 +1269,15 @@ def render_histogram(out, result):
         else:
             emit(line)
 
-    if weighted:
+    if weighted or result.get("excluded_own_bss"):
         emit()
+    if result.get("excluded_own_bss"):
+        out.info(
+            f"Your own network ({result['excluded_own_bss']}) is excluded from "
+            "these figures. It moves with the access point, so it is not "
+            "contention for any channel you might move to."
+        )
+    if weighted:
         out.info(
             "Score is summed linear power spread across overlapping channels, "
             "normalised to the busiest channel."

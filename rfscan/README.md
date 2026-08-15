@@ -124,12 +124,28 @@ The falloff is computed in **frequency space, not channel-number space**. This
 matters for channel 14, which sits 12 MHz above 13 rather than the usual 5;
 subtracting channel numbers would overstate their overlap by more than a third.
 
-A 40 MHz HT channel is modelled as two half-power 20 MHz carriers, one on the
-primary and one on the secondary, read from the `HT operation` element's
-secondary channel offset. When that element is absent the tool assumes 20 MHz
-and **says so in the output** rather than assuming silently. When `HT
-operation` is present and reports no secondary, 20 MHz is a reading rather than
-an assumption and is not flagged.
+A 40 MHz HT channel is modelled as two **half-power** 20 MHz carriers, one on
+the primary and one on the secondary, read from the `HT operation` element's
+secondary channel offset. Half-power is what keeps the accounting honest: a
+40 MHz AP is credited with the same total energy as a 20 MHz one at the same
+signal level, not twice as much. That is asserted directly in the tests rather
+than inferred from plausible-looking output, because over-attributing energy to
+wide APs would inflate every mid-band channel and show up as a spurious plateau
+in the histogram.
+
+One consequence worth knowing: energy that spills below channel 1 or above 14
+falls off the grid, so the *grid total* depends on where a carrier sits (a
+mid-band AP accounts for 5.0x its power, one on channel 1 for 3.0x). This does
+not affect per-channel scores, which sum contributions *to* a channel and are
+complete even at the band edges, and nothing in the recommendation path uses
+the total. Both properties are pinned by tests.
+
+When the `HT operation` element is absent the tool assumes 20 MHz and **says so
+in the output** rather than assuming silently. When it is present and reports
+no secondary, 20 MHz is a reading rather than an assumption and is not flagged.
+When it declares a 40 MHz pairing whose secondary would fall off the channel
+grid, the width is recorded as assumed rather than as a measured 20 MHz, since
+the AP is not 20 MHz and the tool simply could not place the other half.
 
 **This is an approximation of the spectral mask, not a measurement.** The
 scores rank channels against each other. They are not absolute figures and they
@@ -143,6 +159,26 @@ When they disagree, the score is the one to trust.
 
 The tool picks the quietest channel from the legal non-overlapping set, which
 is 1/6/11, plus 13 where the regulatory domain permits it.
+
+**Your own access point is excluded from the scoring.** It is usually the
+loudest thing in the scan and it sits on the channel you are being asked
+whether to leave, so counting it would inflate your current channel against
+every alternative and bias the tool toward always recommending a move. Your own
+AP is not contention: it moves with you. The excluded BSSID is named in the
+output and in `excluded_own_bss` in the JSON.
+
+**Channel 14 is never recommended, even where it is legal.** Japan permits it,
+but it is DSSS-only: no OFDM carrier is allowed there, so an 802.11g/n/ax
+access point cannot use it at all. Recommending it would be actively harmful
+rather than merely suboptimal, so it is excluded from candidacy outright rather
+than scored and ranked. Its occupancy is still measured and displayed, because
+a transmitter sitting there still lands on channel 13, and the histogram labels
+it `802.11b only` rather than showing it as an option.
+
+**Channel 12 raises the same client-compatibility question as 13 and never
+reaches it.** 12 is not a member of any standard non-overlapping set, so it is
+never a candidate in the first place and the channel-13 hysteresis below never
+has occasion to apply to it. Tested against the US, EU and JP domains.
 
 **Channel 13 is only taken when it is meaningfully quieter.** It is legal
 across much of the world but not universally supported by client hardware, and
@@ -192,9 +228,28 @@ or a 2.4-only radio, and that a scan cannot tell those apart.
 
 | Code | Meaning |
 |------|---------|
-| `0` | Scanned cleanly, no action needed |
-| `1` | Congestion found and a move is worth making, or no data available |
-| `2` | Not running on Linux, or no wireless interface |
+| `0` | Ranked the channels and no move is worth making |
+| `1` | A channel change is worth making |
+| `2` | Could not determine |
+
+`2` covers every case where no verdict was reached: not Linux, no wireless
+interface, no data source, an empty scan cache, data that cannot be ranked
+(nmcli reports quality rather than power), and not being associated to anything
+to compare against.
+
+**`1` means, and only means, that a change is worth making.** Anything that
+produced no answer at all is `2`.
+
+This is deliberate and it is a change from an earlier draft, where `1` covered
+both "congestion found" and "no data available". Those are not the same event:
+a cold scan cache on a freshly booted machine would have exited identically to
+a genuinely congested band, which is precisely the conflation this tool spends
+its output warning against. A cron job that alerts on `1` should be alerting on
+"you should move your AP", not on "the scan cache was empty this minute".
+
+`freshcheck` in this repo draws the same line for the same reason: a check that
+could not determine an answer is never reported as a finding. Both tools now
+answer the question the same way.
 
 ## JSON output
 
@@ -215,7 +270,8 @@ object. Both come from a single gather step, so they cannot drift apart.
 | `scan_age_ms` | object | `freshest` and `stalest`, or nulls |
 | `regulatory` | object | `country`, `legal_channels_2ghz`, `reason`, `fell_back` |
 | `associated` | object\|null | `bssid`, `ssid`, `freq`, `channel` |
-| `channels_2ghz` | array | Per channel: `channel`, `freq`, `legal`, `ap_count`, `score`, `score_relative` |
+| `excluded_own_bss` | string\|null | BSSID left out of the scoring, see above |
+| `channels_2ghz` | array | Per channel: `channel`, `freq`, `legal`, `dsss_only`, `ap_count`, `score`, `score_relative` |
 | `channels_5ghz` | array | Per channel: `channel`, `ap_count`, `loudest_dbm` |
 | `networks` | array | Every parsed BSS, see below |
 | `network_count` | int | Length of `networks` |
@@ -287,3 +343,10 @@ one containing hidden SSIDs, non-ASCII SSIDs, a missing signal field, 40 MHz
 APs offset in both directions, unrecognised elements, and two blocks with no
 frequency at all. The regulatory fixtures cover US, DE, JP and the `00` world
 domain, and assert the derived channel lists rather than the parse alone.
+
+The parts that are easy to get wrong without noticing are asserted directly
+rather than inferred from output that merely looks right: that a 40 MHz AP is
+not credited with double the energy of a 20 MHz one, that per-channel scores
+are complete at the band edges, that channel 14 is never a candidate even in
+Japan, that channel 12 never becomes one in any domain, that your own AP is
+excluded from scoring, and that each exit code means exactly one thing.

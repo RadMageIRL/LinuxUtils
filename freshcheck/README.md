@@ -224,6 +224,10 @@ should not look like a failure just because it was not run as root. If you want
 unknowns to be actionable in a cron job, filter on `status` in the JSON output
 rather than on the exit code.
 
+`rfscan` in this repo draws the same line: exit `1` means an actionable
+finding, and anything that produced no answer is `2`. Both tools answer the
+question the same way, so a cron job can treat them alike.
+
 ## Options
 
 | Flag | Description |

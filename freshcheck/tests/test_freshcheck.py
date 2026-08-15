@@ -559,12 +559,28 @@ class TestFilesystem(TreeCase):
         )
 
         self.use(
-            {"/boot/efi": (300 * 1024**2, 30 * 1024**2)},  # 10% free
+            {"/boot/efi": (300 * 1024**2, 45 * 1024**2)},  # 15% free
             (100 * 1024**3, 60 * 1024**3),
         )
         result = freshcheck.check_filesystem(ctx())
         self.assertEqual(result["status"], "warn")
         self.assertIn("/boot/efi", result["summary"])
+
+    def test_esp_thresholds_at_their_exact_boundaries(self):
+        # Pinned deliberately rather than left implicit: an earlier version of
+        # the test above sat at exactly 10.0%, which is the fail boundary, so
+        # it would have flipped verdict on a rounding change without anyone
+        # having chosen that.
+        self.write("/proc/mounts", "/dev/sda1 / ext4 rw 0 0\n/dev/sda2 /boot vfat rw 0 0\n")
+        for available_pct, expected in ((9, "fail"), (10, "warn"), (19, "warn"), (20, "ok")):
+            with self.subTest(pct=available_pct):
+                total = 1000 * 1024**2
+                self.use(
+                    {"/boot": (total, available_pct * 10 * 1024**2)},
+                    (100 * 1024**3, 60 * 1024**3),
+                )
+                result = freshcheck.check_filesystem(ctx())
+                self.assertEqual(result["status"], expected)
 
 
 # -------------------------------------------------------------- failed units

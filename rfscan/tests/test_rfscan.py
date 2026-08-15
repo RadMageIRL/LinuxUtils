@@ -142,6 +142,26 @@ class TestMessyScan(unittest.TestCase):
         self.assertEqual(bss["secondary_channel"], 9)
         self.assertEqual(bss["width_mhz"], 40)
 
+    def test_off_grid_40mhz_secondary_is_flagged_as_assumed(self):
+        # HT operation declares a 40 MHz pairing whose secondary would be
+        # channel 17, which does not exist. The AP is not 20 MHz; we simply
+        # cannot place the other half, so recording a measured 20 MHz would
+        # assert something that was never read.
+        text = (
+            "BSS 00:11:22:33:44:ff(on wlan0)\n"
+            "\tfreq: 2462\n"
+            "\tsignal: -50.00 dBm\n"
+            "\tSSID: EdgeWide\n"
+            "\tHT operation:\n"
+            "\t\t * primary channel: 13\n"
+            "\t\t * secondary channel offset: above\n"
+        )
+        networks, _ = rfscan.parse_iw_scan(text)
+        bss = networks[0]
+        self.assertIsNone(bss["secondary_channel"])
+        self.assertEqual(bss["width_mhz"], 20)
+        self.assertTrue(bss["width_assumed"])
+
     def test_five_ghz_width_is_not_asserted(self):
         bss = self.found["00:11:22:33:44:07"]
         self.assertEqual(bss["band"], "5")
@@ -264,6 +284,50 @@ class TestWeighting(unittest.TestCase):
         self.assertEqual(unweighted, 1)
         self.assertEqual(scores[6], 0.0)
 
+    def total_energy(self, networks):
+        scores, _, _ = rfscan.occupancy_2ghz(networks)
+        return sum(scores.values())
+
+    def ap(self, channel, secondary=None, dbm=-40.0):
+        return {
+            "band": "2.4",
+            "channel": channel,
+            "signal_dbm": dbm,
+            "secondary_channel": secondary,
+        }
+
+    def test_forty_mhz_does_not_double_count_energy(self):
+        # The failure this guards against: crediting a 40 MHz AP with the full
+        # power on BOTH carriers instead of half on each. That would total ~2x
+        # the 20 MHz case and would inflate every mid-band channel, which is
+        # exactly what a spurious plateau in the histogram would look like.
+        narrow = self.total_energy([self.ap(6)])
+        wide = self.total_energy([self.ap(6, 10)])
+        ratio = wide / narrow
+        self.assertLess(ratio, 1.05)
+        self.assertGreater(ratio, 0.95)
+        # Stated explicitly so the intent survives a future refactor.
+        self.assertNotAlmostEqual(ratio, 2.0, places=1)
+
+    def test_grid_edge_truncation_is_a_known_artifact(self):
+        # Energy that spills below channel 1 or above 14 leaves the grid, so the
+        # GRID TOTAL depends on where a carrier sits: a mid-band AP accounts for
+        # 5.0x its power and one on channel 1 only 3.0x. This is a property of
+        # summing a finite grid, not of the weighting, and it is pinned here so
+        # that a future conservation check is not read as a regression.
+        power = rfscan.dbm_to_mw(-40.0)
+        self.assertAlmostEqual(self.total_energy([self.ap(6)]) / power, 5.0, places=6)
+        self.assertAlmostEqual(self.total_energy([self.ap(1)]) / power, 3.0, places=6)
+
+    def test_per_channel_scores_are_not_truncated_at_the_band_edge(self):
+        # The reassurance that makes the artifact above harmless: a channel's
+        # own score sums contributions TO it from every AP within range, so it
+        # is complete even at channel 1. Only the diagnostic total is truncated,
+        # and nothing in the recommendation path uses that total.
+        power = rfscan.dbm_to_mw(-40.0)
+        scores, _, _ = rfscan.occupancy_2ghz([self.ap(1), self.ap(2), self.ap(3)])
+        self.assertAlmostEqual(scores[1], power * (1.0 + 0.8 + 0.6), places=12)
+
     def test_forty_mhz_spreads_across_both_carriers(self):
         wide = [
             {"band": "2.4", "channel": 6, "signal_dbm": -40.0, "secondary_channel": 10}
@@ -277,6 +341,27 @@ class TestWeighting(unittest.TestCase):
         # 20 MHz one on the same primary channel.
         self.assertGreater(wide_scores[11], narrow_scores[11])
         self.assertLess(wide_scores[6], narrow_scores[6])
+
+    def test_own_bss_is_excluded_from_scoring(self):
+        # Your own AP is usually the loudest thing in the scan and it sits on
+        # the channel you are being asked whether to leave. Counting it would
+        # inflate the current channel against every alternative and bias the
+        # tool toward always recommending a move.
+        networks = [
+            dict(self.ap(6, dbm=-30.0), bssid="aa:bb:cc:dd:ee:ff"),
+            dict(self.ap(1, dbm=-70.0), bssid="11:22:33:44:55:66"),
+        ]
+        with_own, counts_with, _ = rfscan.occupancy_2ghz(networks)
+        without, counts_without, _ = rfscan.occupancy_2ghz(
+            networks, exclude_bssid="aa:bb:cc:dd:ee:ff"
+        )
+        self.assertGreater(with_own[6], without[6])
+        self.assertEqual(without[6], 0.0)
+        # Counts move with the score so the two columns cannot disagree.
+        self.assertEqual(counts_with[6], 1)
+        self.assertEqual(counts_without[6], 0)
+        # Everyone else is untouched.
+        self.assertAlmostEqual(with_own[1], without[1], places=12)
 
     def test_five_ghz_is_excluded_from_the_24_model(self):
         networks = [
@@ -334,6 +419,29 @@ class TestRegulatory(unittest.TestCase):
     def test_candidates_include_13_only_where_legal(self):
         self.assertEqual(rfscan.pick_candidates(list(range(1, 12))), [1, 6, 11])
         self.assertEqual(rfscan.pick_candidates(list(range(1, 14))), [1, 6, 11, 13])
+
+    def test_channel_14_is_never_a_candidate_even_in_japan(self):
+        # 14 is DSSS-only: an OFDM access point cannot use it at all, so
+        # recommending it is actively harmful rather than merely suboptimal.
+        # Legality is necessary but not sufficient.
+        country, ranges = rfscan.parse_reg(fixture("iw-reg-jp.txt"))
+        permitted, _, _ = rfscan.legal_channels(country, ranges)
+        self.assertIn(14, permitted)
+        self.assertNotIn(14, rfscan.pick_candidates(permitted))
+
+    def test_channel_14_is_excluded_even_as_the_last_resort(self):
+        # The fallback branch must not reach for it either.
+        self.assertNotIn(14, rfscan.pick_candidates([14]))
+        self.assertEqual(rfscan.pick_candidates([12, 14]), [12])
+
+    def test_channel_12_is_never_a_candidate_in_any_real_domain(self):
+        # 12 raises the same client-compatibility question as 13, but it never
+        # reaches the hysteresis because it is not in any standard
+        # non-overlapping set and so is never offered in the first place.
+        for name in ("iw-reg-us.txt", "iw-reg-de.txt", "iw-reg-jp.txt"):
+            country, ranges = rfscan.parse_reg(fixture(name))
+            permitted, _, _ = rfscan.legal_channels(country, ranges)
+            self.assertNotIn(12, rfscan.pick_candidates(permitted), name)
 
 
 class TestRecommendation(unittest.TestCase):
@@ -418,6 +526,126 @@ class TestRecommendation(unittest.TestCase):
         self.assertEqual(result["best_channel"], 1)
         self.assertFalse(result["worth_changing"])
         self.assertIn("not associated", result["reason"])
+
+
+class TestExitCodes(unittest.TestCase):
+    """Exit 1 means, and only means, "a change is worth making".
+
+    A cold scan cache must NOT exit the same as a genuinely congested band.
+    That conflation is the thing these pin against, and it is why no-data
+    cases resolve to 2 (could not determine) rather than 1."""
+
+    def setUp(self):
+        self.saved = (rfscan.run, rfscan.wireless_interfaces, rfscan.sys.platform)
+        rfscan.sys.platform = "linux"
+        rfscan.wireless_interfaces = lambda: [
+            {"name": "wlan0", "detected_via": "phy80211", "operstate": "up", "up": True}
+        ]
+        if not hasattr(rfscan.os, "geteuid"):
+            rfscan.os.geteuid = lambda: 1000
+
+    def tearDown(self):
+        rfscan.run, rfscan.wireless_interfaces, rfscan.sys.platform = self.saved
+
+    def build(self, table, **overrides):
+        def fake(cmd, timeout=20):
+            joined = " ".join(cmd)
+            for prefix, (rc, out) in table.items():
+                if joined.startswith(prefix):
+                    return rc, out, None
+            return None, "", "unavailable"
+
+        rfscan.run = fake
+        args = _Args(**overrides)
+        return rfscan.build_result(args)
+
+    def test_empty_cache_is_could_not_determine_not_congestion(self):
+        result = self.build(
+            {"iw reg get": (0, fixture("iw-reg-us.txt")), "iw dev wlan0 scan dump": (0, "")}
+        )
+        self.assertEqual(result["error"], "empty-scan-cache")
+        self.assertEqual(result["exit_code"], rfscan.COULD_NOT_DETERMINE)
+        self.assertNotEqual(result["exit_code"], rfscan.ACTION_WORTHWHILE)
+
+    def test_no_data_source_is_could_not_determine(self):
+        result = self.build({"iw reg get": (0, fixture("iw-reg-us.txt"))})
+        self.assertEqual(result["error"], "no-data")
+        self.assertEqual(result["exit_code"], rfscan.COULD_NOT_DETERMINE)
+
+    def test_no_wireless_interface_is_could_not_determine(self):
+        rfscan.wireless_interfaces = lambda: []
+        result = self.build({"iw reg get": (0, fixture("iw-reg-us.txt"))})
+        self.assertEqual(result["exit_code"], rfscan.COULD_NOT_DETERMINE)
+
+    def test_congestion_is_the_only_thing_that_exits_one(self):
+        result = self.build(
+            {
+                "iw reg get": (0, fixture("iw-reg-us.txt")),
+                "iw dev wlan0 scan dump": (0, fixture("iw-scan-messy.txt")),
+                "iw dev wlan0 link": (0, fixture("iw-link-connected.txt")),
+            }
+        )
+        self.assertIsNone(result["error"])
+        self.assertTrue(result["recommendation"]["worth_changing"])
+        self.assertEqual(result["exit_code"], rfscan.ACTION_WORTHWHILE)
+
+    def test_unrankable_data_is_could_not_determine_not_a_clean_bill(self):
+        # nmcli reports a quality percentage, so no ranking is possible. Exiting
+        # 0 would assert "no move is worth making", which was never determined.
+        result = self.build(
+            {
+                "iw reg get": (0, fixture("iw-reg-de.txt")),
+                "nmcli": (0, fixture("nmcli-list.txt")),
+            }
+        )
+        self.assertFalse(result["weighting_available"])
+        self.assertIsNone(result["recommendation"]["best_channel"])
+        self.assertEqual(result["exit_code"], rfscan.COULD_NOT_DETERMINE)
+
+    def test_not_associated_is_could_not_determine(self):
+        scan = (
+            "BSS 00:11:22:33:44:aa(on wlan0)\n"
+            "\tfreq: 2437\n"
+            "\tsignal: -50.00 dBm\n"
+            "\tSSID: Someone\n"
+        )
+        result = self.build(
+            {
+                "iw reg get": (0, fixture("iw-reg-us.txt")),
+                "iw dev wlan0 scan dump": (0, scan),
+                "iw dev wlan0 link": (0, "Not connected.\n"),
+            }
+        )
+        self.assertIsNone(result["recommendation"]["current_channel"])
+        self.assertEqual(result["exit_code"], rfscan.COULD_NOT_DETERMINE)
+
+    def test_clean_band_exits_zero(self):
+        # Associated on channel 1 with nothing else on the band: no move to make.
+        scan = (
+            "BSS 00:11:22:33:44:01(on wlan0) -- associated\n"
+            "\tfreq: 2412\n"
+            "\tsignal: -40.00 dBm\n"
+            "\tSSID: Only\n"
+        )
+        link = "Connected to 00:11:22:33:44:01 (on wlan0)\n\tSSID: Only\n\tfreq: 2412\n"
+        result = self.build(
+            {
+                "iw reg get": (0, fixture("iw-reg-us.txt")),
+                "iw dev wlan0 scan dump": (0, scan),
+                "iw dev wlan0 link": (0, link),
+            }
+        )
+        self.assertFalse(result["recommendation"]["worth_changing"])
+        self.assertEqual(result["exit_code"], rfscan.NO_ACTION_NEEDED)
+
+
+class _Args:
+    def __init__(self, iface=None, active=False, json=False, no_color=True, band="2.4"):
+        self.iface = iface
+        self.active = active
+        self.json = json
+        self.no_color = no_color
+        self.band = band
 
 
 class TestNmcli(unittest.TestCase):
