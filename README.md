@@ -37,6 +37,7 @@ never shares a code with one that found a problem.
 | [`freshcheck`](freshcheck/) | Post-install and post-update audit: running kernel vs installed modules, microcode, TRIM, journal size, swap and zram, CPU scaling, time sync, filesystem headroom, failed units. Reports fixes, never applies them. |
 | [`chronicle`](chronicle/) | What changed on this machine, and when. Merges the package log, journal boots and unit failures, and `/etc` mtimes into one timeline. Orders and labels events; never claims one caused another. |
 | [`portwatch`](portwatch/) | Snapshot listening sockets and diff against a baseline. Reads `/proc/net` directly, attributes sockets to processes, and reports what changed, including a service moving from loopback to a wildcard address. No risk scoring. |
+| [`sleepcheck`](sleepcheck/) | Audit kernel sleep states, systemd policy, live inhibitor locks, firmware wake sources, and recent sleep-service events. Read-only; reports observations without assigning a wake cause. |
 
 ## Install
 
